@@ -2,6 +2,7 @@ use std::fmt;
 
 use rustc_errors::ErrorGuaranteed;
 use rustc_infer::infer::canonical::Canonical;
+use rustc_middle::bug;
 use rustc_middle::mir::ConstraintCategory;
 use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt, TypeFoldable};
 use rustc_span::def_id::DefId;
@@ -39,6 +40,12 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
 
         let TypeOpOutput { output, constraints, error_info } =
             op.fully_perform(self.infcx, locations.span(self.body))?;
+        if cfg!(debug_assertions) {
+            let data = self.infcx.take_and_reset_region_constraints();
+            if !data.is_empty() {
+                panic!("leftover region constraints: {data:#?}");
+            }
+        }
 
         debug!(?output, ?constraints);
 

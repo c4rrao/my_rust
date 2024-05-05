@@ -2,12 +2,14 @@
 
 use cranelift_codegen::ir::UserFuncName;
 use cranelift_codegen::CodegenError;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::ModuleError;
 use rustc_ast::InlineAsmOptions;
 use rustc_index::IndexVec;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::FnAbiOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
+use rustc_middle::ty::TypeVisitableExt;
 use rustc_monomorphize::is_call_from_compiler_builtins_to_upstream_monomorphization;
 
 use crate::constant::ConstantCx;
@@ -267,9 +269,18 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
         .generic_activity("codegen prelude")
         .run(|| crate::abi::codegen_fn_prelude(fx, start_block));
 
+    let reachable_blocks = traversal::mono_reachable_as_bitset(fx.mir, fx.tcx, fx.instance);
+
     for (bb, bb_data) in fx.mir.basic_blocks.iter_enumerated() {
         let block = fx.get_block(bb);
         fx.bcx.switch_to_block(block);
+
+        if !reachable_blocks.contains(bb) {
+            // We want to skip this block, because it's not reachable. But we still create
+            // the block so terminators in other blocks can reference it.
+            fx.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+            continue;
+        }
 
         if bb_data.is_cleanup {
             // Unwinding after panicking is not supported
@@ -789,7 +800,7 @@ fn codegen_stmt<'tcx>(
                             layout.offset_of_subfield(fx, fields.iter()).bytes()
                         }
                         NullOp::UbChecks => {
-                            let val = fx.tcx.sess.opts.debug_assertions;
+                            let val = fx.tcx.sess.ub_checks();
                             let val = CValue::by_val(
                                 fx.bcx.ins().iconst(types::I8, i64::try_from(val).unwrap()),
                                 fx.layout_of(fx.tcx.types.bool),
@@ -803,6 +814,25 @@ fn codegen_stmt<'tcx>(
                         fx.layout_of(fx.tcx.types.usize),
                     );
                     lval.write_cvalue(fx, val);
+                }
+                Rvalue::Aggregate(ref kind, ref operands)
+                    if matches!(**kind, AggregateKind::RawPtr(..)) =>
+                {
+                    let ty = to_place_and_rval.1.ty(&fx.mir.local_decls, fx.tcx);
+                    let layout = fx.layout_of(fx.monomorphize(ty));
+                    let [data, meta] = &*operands.raw else {
+                        bug!("RawPtr fields: {operands:?}");
+                    };
+                    let data = codegen_operand(fx, data);
+                    let meta = codegen_operand(fx, meta);
+                    assert!(data.layout().ty.is_unsafe_ptr());
+                    assert!(layout.ty.is_unsafe_ptr());
+                    let ptr_val = if meta.layout().is_zst() {
+                        data.cast_pointer_to(layout)
+                    } else {
+                        CValue::by_val_pair(data.load_scalar(fx), meta.load_scalar(fx), layout)
+                    };
+                    lval.write_cvalue(fx, ptr_val);
                 }
                 Rvalue::Aggregate(ref kind, ref operands) => {
                     let (variant_index, variant_dest, active_field_index) = match **kind {

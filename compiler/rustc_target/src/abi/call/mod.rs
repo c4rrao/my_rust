@@ -1,6 +1,7 @@
 use crate::abi::{self, Abi, Align, FieldsShape, Size};
 use crate::abi::{HasDataLayout, TyAbiInterface, TyAndLayout};
-use crate::spec::{self, HasTargetSpec};
+use crate::spec::{self, HasTargetSpec, HasWasmCAbiOpt};
+use rustc_macros::HashStable_Generic;
 use rustc_span::Symbol;
 use std::fmt;
 use std::str::FromStr;
@@ -100,6 +101,8 @@ pub use attr_impl::ArgAttribute;
 #[allow(non_upper_case_globals)]
 #[allow(unused)]
 mod attr_impl {
+    use rustc_macros::HashStable_Generic;
+
     // The subset of llvm::Attribute needed for arguments, packed into a bitfield.
     #[derive(Clone, Copy, Default, Hash, PartialEq, Eq, HashStable_Generic)]
     pub struct ArgAttribute(u8);
@@ -255,17 +258,34 @@ pub struct Uniform {
     ///   for 64-bit integers with a total size of 20 bytes. When the argument is actually passed,
     ///   this size will be rounded up to the nearest multiple of `unit.size`.
     pub total: Size,
+
+    /// Indicate that the argument is consecutive, in the sense that either all values need to be
+    /// passed in register, or all on the stack. If they are passed on the stack, there should be
+    /// no additional padding between elements.
+    pub is_consecutive: bool,
 }
 
 impl From<Reg> for Uniform {
     fn from(unit: Reg) -> Uniform {
-        Uniform { unit, total: unit.size }
+        Uniform { unit, total: unit.size, is_consecutive: false }
     }
 }
 
 impl Uniform {
     pub fn align<C: HasDataLayout>(&self, cx: &C) -> Align {
         self.unit.align(cx)
+    }
+
+    /// Pass using one or more values of the given type, without requiring them to be consecutive.
+    /// That is, some values may be passed in register and some on the stack.
+    pub fn new(unit: Reg, total: Size) -> Self {
+        Uniform { unit, total, is_consecutive: false }
+    }
+
+    /// Pass using one or more consecutive values of the given type. Either all values will be
+    /// passed in registers, or all on the stack.
+    pub fn consecutive(unit: Reg, total: Size) -> Self {
+        Uniform { unit, total, is_consecutive: true }
     }
 }
 
@@ -812,7 +832,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
     ) -> Result<(), AdjustForForeignAbiError>
     where
         Ty: TyAbiInterface<'a, C> + Copy,
-        C: HasDataLayout + HasTargetSpec,
+        C: HasDataLayout + HasTargetSpec + HasWasmCAbiOpt,
     {
         if abi == spec::abi::Abi::X86Interrupt {
             if let Some(arg) = self.args.first_mut() {
@@ -869,7 +889,9 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             "sparc" => sparc::compute_abi_info(cx, self),
             "sparc64" => sparc64::compute_abi_info(cx, self),
             "nvptx64" => {
-                if cx.target_spec().adjust_abi(abi, self.c_variadic) == spec::abi::Abi::PtxKernel {
+                if cx.target_spec().adjust_abi(cx, abi, self.c_variadic)
+                    == spec::abi::Abi::PtxKernel
+                {
                     nvptx64::compute_ptx_kernel_abi_info(cx, self)
                 } else {
                     nvptx64::compute_abi_info(self)
@@ -878,7 +900,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             "hexagon" => hexagon::compute_abi_info(self),
             "riscv32" | "riscv64" => riscv::compute_abi_info(cx, self),
             "wasm32" | "wasm64" => {
-                if cx.target_spec().adjust_abi(abi, self.c_variadic) == spec::abi::Abi::Wasm {
+                if cx.target_spec().adjust_abi(cx, abi, self.c_variadic) == spec::abi::Abi::Wasm {
                     wasm::compute_wasm_abi_info(self)
                 } else {
                     wasm::compute_c_abi_info(cx, self)
@@ -930,7 +952,7 @@ impl FromStr for Conv {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

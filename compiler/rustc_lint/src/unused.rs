@@ -16,6 +16,7 @@ use rustc_hir::def_id::DefId;
 use rustc_infer::traits::util::elaborate;
 use rustc_middle::ty::adjustment;
 use rustc_middle::ty::{self, Ty};
+use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
 use rustc_span::symbol::Symbol;
 use rustc_span::symbol::{kw, sym};
 use rustc_span::{BytePos, Span};
@@ -176,6 +177,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                 | hir::BinOpKind::Shr => Some("bitwise operation"),
             },
             hir::ExprKind::AddrOf(..) => Some("borrow"),
+            hir::ExprKind::OffsetOf(..) => Some("`offset_of` call"),
             hir::ExprKind::Unary(..) => Some("unary operation"),
             _ => None,
         };
@@ -1056,7 +1058,7 @@ impl UnusedParens {
         avoid_mut: bool,
         keep_space: (bool, bool),
     ) {
-        use ast::{BindingAnnotation, PatKind};
+        use ast::{BindingMode, PatKind};
 
         if let PatKind::Paren(inner) = &value.kind {
             match inner.kind {
@@ -1068,16 +1070,20 @@ impl UnusedParens {
                 // Avoid `p0 | .. | pn` if we should.
                 PatKind::Or(..) if avoid_or => return,
                 // Avoid `mut x` and `mut x @ p` if we should:
-                PatKind::Ident(BindingAnnotation::MUT, ..) if avoid_mut => {
+                PatKind::Ident(BindingMode::MUT, ..) if avoid_mut => {
                     return;
                 }
                 // Otherwise proceed with linting.
                 _ => {}
             }
-            let spans = inner
-                .span
-                .find_ancestor_inside(value.span)
-                .map(|inner| (value.span.with_hi(inner.lo()), value.span.with_lo(inner.hi())));
+            let spans = if !value.span.from_expansion() {
+                inner
+                    .span
+                    .find_ancestor_inside(value.span)
+                    .map(|inner| (value.span.with_hi(inner.lo()), value.span.with_lo(inner.hi())))
+            } else {
+                None
+            };
             self.emit_unused_delims(cx, value.span, spans, "pattern", keep_space, false);
         }
     }
@@ -1231,13 +1237,15 @@ impl EarlyLintPass for UnusedParens {
                     ast::TyKind::TraitObject(..) => {}
                     ast::TyKind::BareFn(b)
                         if self.with_self_ty_parens && b.generic_params.len() > 0 => {}
-                    ast::TyKind::ImplTrait(_, bounds) if bounds.len() > 1 => {}
+                    ast::TyKind::ImplTrait(_, bounds, _) if bounds.len() > 1 => {}
                     _ => {
-                        let spans = r
-                            .span
-                            .find_ancestor_inside(ty.span)
-                            .map(|r| (ty.span.with_hi(r.lo()), ty.span.with_lo(r.hi())));
-
+                        let spans = if !ty.span.from_expansion() {
+                            r.span
+                                .find_ancestor_inside(ty.span)
+                                .map(|r| (ty.span.with_hi(r.lo()), ty.span.with_lo(r.hi())))
+                        } else {
+                            None
+                        };
                         self.emit_unused_delims(cx, ty.span, spans, "type", (false, false), false);
                     }
                 }

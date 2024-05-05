@@ -4,6 +4,7 @@ use rustc_errors::pluralize;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind};
 use rustc_hir::def_id::DefId;
+use rustc_macros::{TypeFoldable, TypeVisitable};
 use rustc_span::symbol::Symbol;
 use rustc_target::spec::abi;
 use std::borrow::Cow;
@@ -285,6 +286,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Adt(def, _) => def.descr().into(),
             ty::Foreign(_) => "extern type".into(),
             ty::Array(..) => "array".into(),
+            ty::Pat(..) => "pattern type".into(),
             ty::Slice(_) => "slice".into(),
             ty::RawPtr(_, _) => "raw pointer".into(),
             ty::Ref(.., mutbl) => match mutbl {

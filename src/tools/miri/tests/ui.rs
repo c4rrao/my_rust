@@ -1,9 +1,11 @@
-use colored::*;
-use regex::bytes::Regex;
 use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::{env, process::Command};
+
+use colored::*;
+use regex::bytes::Regex;
 use ui_test::color_eyre::eyre::{Context, Result};
 use ui_test::{
     status_emitter, CommandBuilder, Config, Format, Match, Mode, OutputConflictHandling,
@@ -44,12 +46,15 @@ fn build_so_for_c_ffi_tests() -> PathBuf {
             // This is to avoid automatically adding `malloc`, etc.
             // Source: https://anadoxin.org/blog/control-over-symbol-exports-in-gcc.html/
             "-fPIC",
-            "-Wl,--version-script=tests/extern-so/libcode.version",
+            "-Wl,--version-script=tests/extern-so/libtest.map",
         ])
         .output()
         .expect("failed to generate shared object file for testing external C function calls");
     if !cc_output.status.success() {
-        panic!("error in generating shared object file for testing external C function calls");
+        panic!(
+            "error in generating shared object file for testing external C function calls:\n{}",
+            String::from_utf8_lossy(&cc_output.stderr),
+        );
     }
     so_file_path
 }
@@ -63,8 +68,8 @@ fn miri_config(target: &str, path: &str, mode: Mode, with_dependencies: bool) ->
 
     let mut config = Config {
         target: Some(target.to_owned()),
-        stderr_filters: STDERR.clone(),
-        stdout_filters: STDOUT.clone(),
+        stderr_filters: stderr_filters().into(),
+        stdout_filters: stdout_filters().into(),
         mode,
         program,
         out_dir: PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap()).join("ui"),
@@ -108,6 +113,13 @@ fn run_tests(
     config.program.envs.push(("RUST_BACKTRACE".into(), Some("1".into())));
 
     // Add some flags we always want.
+    config.program.args.push(
+        format!(
+            "--sysroot={}",
+            env::var("MIRI_SYSROOT").expect("MIRI_SYSROOT must be set to run the ui test suite")
+        )
+        .into(),
+    );
     config.program.args.push("-Dwarnings".into());
     config.program.args.push("-Dunused".into());
     config.program.args.push("-Ainternal_features".into());
@@ -120,10 +132,10 @@ fn run_tests(
     config.program.args.push("--target".into());
     config.program.args.push(target.into());
 
-    // If we're on linux, and we're testing the extern-so functionality,
-    // then build the shared object file for testing external C function calls
-    // and push the relevant compiler flag.
-    if cfg!(target_os = "linux") && path.starts_with("tests/extern-so/") {
+    // If we're testing the extern-so functionality, then build the shared object file for testing
+    // external C function calls and push the relevant compiler flag.
+    if path.starts_with("tests/extern-so/") {
+        assert!(cfg!(target_os = "linux"));
         let so_file_path = build_so_for_c_ffi_tests();
         let mut flag = std::ffi::OsString::from("-Zmiri-extern-so-file=");
         flag.push(so_file_path.into_os_string());
@@ -163,15 +175,18 @@ fn run_tests(
 }
 
 macro_rules! regexes {
-    ($name:ident: $($regex:expr => $replacement:expr,)*) => {lazy_static::lazy_static! {
-        static ref $name: Vec<(Match, &'static [u8])> = vec![
-            $((Regex::new($regex).unwrap().into(), $replacement.as_bytes()),)*
-        ];
-    }};
+    ($name:ident: $($regex:expr => $replacement:expr,)*) => {
+        fn $name() -> &'static [(Match, &'static [u8])] {
+            static S: OnceLock<Vec<(Match, &'static [u8])>> = OnceLock::new();
+            S.get_or_init(|| vec![
+                $((Regex::new($regex).unwrap().into(), $replacement.as_bytes()),)*
+            ])
+        }
+    };
 }
 
 regexes! {
-    STDOUT:
+    stdout_filters:
     // Windows file paths
     r"\\"                           => "/",
     // erase borrow tags
@@ -180,7 +195,7 @@ regexes! {
 }
 
 regexes! {
-    STDERR:
+    stderr_filters:
     // erase line and column info
     r"\.rs:[0-9]+:[0-9]+(: [0-9]+:[0-9]+)?" => ".rs:LL:CC",
     // erase alloc ids
@@ -292,12 +307,13 @@ fn main() -> Result<()> {
 
 fn run_dep_mode(target: String, mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let path = args.next().expect("./miri run-dep must be followed by a file name");
-    let config = miri_config(
+    let mut config = miri_config(
         &target,
         "",
         Mode::Yolo { rustfix: RustfixMode::Disabled },
         /* with dependencies */ true,
     );
+    config.program.args.clear(); // remove the `--error-format` that ui_test adds by default
     let dep_args = config.build_dependencies()?;
 
     let mut cmd = config.program.build(&config.out_dir);

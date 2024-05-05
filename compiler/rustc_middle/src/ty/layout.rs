@@ -10,12 +10,15 @@ use rustc_errors::{
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_index::IndexVec;
+use rustc_macros::{extension, HashStable, TyDecodable, TyEncodable};
 use rustc_session::config::OptLevel;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
 use rustc_target::abi::call::FnAbi;
 use rustc_target::abi::*;
-use rustc_target::spec::{abi::Abi as SpecAbi, HasTargetSpec, PanicStrategy, Target};
+use rustc_target::spec::{
+    abi::Abi as SpecAbi, HasTargetSpec, HasWasmCAbiOpt, PanicStrategy, Target, WasmCAbi,
+};
 
 use std::borrow::Cow;
 use std::cmp;
@@ -122,7 +125,7 @@ impl Primitive {
             F64 => tcx.types.f64,
             F128 => tcx.types.f128,
             // FIXME(erikdesjardins): handle non-default addrspace ptr sizes
-            Pointer(_) => Ty::new_mut_ptr(tcx, Ty::new_unit(tcx)),
+            Pointer(_) => Ty::new_mut_ptr(tcx, tcx.types.unit),
         }
     }
 
@@ -336,6 +339,10 @@ impl<'tcx> SizeSkeleton<'tcx> {
                         debug_assert!(tail.has_non_region_param());
                         Ok(SizeSkeleton::Pointer { non_zero, tail: tcx.erase_regions(tail) })
                     }
+                    ty::Error(guar) => {
+                        // Fixes ICE #124031
+                        return Err(tcx.arena.alloc(LayoutError::ReferencesError(*guar)));
+                    }
                     _ => bug!(
                         "SizeSkeleton::compute({ty}): layout errored ({err:?}), yet \
                               tail `{tail}` is not a type parameter or a projection",
@@ -483,6 +490,12 @@ impl<'tcx> HasTargetSpec for TyCtxt<'tcx> {
     }
 }
 
+impl<'tcx> HasWasmCAbiOpt for TyCtxt<'tcx> {
+    fn wasm_c_abi_opt(&self) -> WasmCAbi {
+        self.sess.opts.unstable_opts.wasm_c_abi
+    }
+}
+
 impl<'tcx> HasTyCtxt<'tcx> for TyCtxt<'tcx> {
     #[inline]
     fn tcx(&self) -> TyCtxt<'tcx> {
@@ -525,6 +538,12 @@ impl<'tcx, T: HasDataLayout> HasDataLayout for LayoutCx<'tcx, T> {
 impl<'tcx, T: HasTargetSpec> HasTargetSpec for LayoutCx<'tcx, T> {
     fn target_spec(&self) -> &Target {
         self.tcx.target_spec()
+    }
+}
+
+impl<'tcx, T: HasWasmCAbiOpt> HasWasmCAbiOpt for LayoutCx<'tcx, T> {
+    fn wasm_c_abi_opt(&self) -> WasmCAbi {
+        self.tcx.wasm_c_abi_opt()
     }
 }
 
@@ -742,6 +761,7 @@ where
                 | ty::FnDef(..)
                 | ty::CoroutineWitness(..)
                 | ty::Foreign(..)
+                | ty::Pat(_, _)
                 | ty::Dynamic(_, _, ty::Dyn) => {
                     bug!("TyAndLayout::field({:?}): not applicable", this)
                 }
@@ -755,7 +775,7 @@ where
                     // (which may have no non-DST form), and will work as long
                     // as the `Abi` or `FieldsShape` is checked by users.
                     if i == 0 {
-                        let nil = Ty::new_unit(tcx);
+                        let nil = tcx.types.unit;
                         let unit_ptr_ty = if this.ty.is_unsafe_ptr() {
                             Ty::new_mut_ptr(tcx, nil)
                         } else {

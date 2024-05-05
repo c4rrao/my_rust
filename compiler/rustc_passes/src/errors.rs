@@ -820,6 +820,16 @@ pub struct MissingLangItem {
 }
 
 #[derive(Diagnostic)]
+#[diag(passes_lang_item_fn_with_track_caller)]
+pub struct LangItemWithTrackCaller {
+    #[primary_span]
+    pub attr_span: Span,
+    pub name: Symbol,
+    #[label]
+    pub sig_span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag(passes_lang_item_fn_with_target_feature)]
 pub struct LangItemWithTargetFeature {
     #[primary_span]
@@ -1197,22 +1207,6 @@ pub struct NakedFunctionsMustUseNoreturn {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_attr_only_on_main)]
-pub struct AttrOnlyOnMain {
-    #[primary_span]
-    pub span: Span,
-    pub attr: Symbol,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_attr_only_on_root_main)]
-pub struct AttrOnlyOnRootMain {
-    #[primary_span]
-    pub span: Span,
-    pub attr: Symbol,
-}
-
-#[derive(Diagnostic)]
 #[diag(passes_attr_only_in_functions)]
 pub struct AttrOnlyInFunctions {
     #[primary_span]
@@ -1245,13 +1239,6 @@ pub struct MultipleStartFunctions {
 #[derive(Diagnostic)]
 #[diag(passes_extern_main)]
 pub struct ExternMain {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_unix_sigpipe_values)]
-pub struct UnixSigpipeValues {
     #[primary_span]
     pub span: Span,
 }
@@ -1755,7 +1742,7 @@ impl Subdiagnostic for UnusedVariableStringInterp {
     fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
         self,
         diag: &mut Diag<'_, G>,
-        _f: F,
+        _f: &F,
     ) {
         diag.span_label(self.lit, crate::fluent_generated::passes_maybe_string_interpolation);
         diag.multipart_suggestion(

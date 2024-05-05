@@ -25,6 +25,7 @@ pub type GatedCfg = (Symbol, Symbol, GateFn);
 const GATED_CFGS: &[GatedCfg] = &[
     // (name in cfg, feature, function to check if the feature is enabled)
     (sym::overflow_checks, sym::cfg_overflow_checks, cfg_fn!(cfg_overflow_checks)),
+    (sym::ub_checks, sym::cfg_ub_checks, cfg_fn!(cfg_ub_checks)),
     (sym::target_thread_local, sym::cfg_target_thread_local, cfg_fn!(cfg_target_thread_local)),
     (
         sym::target_has_atomic_equal_alignment,
@@ -395,10 +396,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
 
     // Entry point:
-    gated!(
-        unix_sigpipe, Normal, template!(NameValueStr: "inherit|sig_ign|sig_dfl"), ErrorFollowing,
-        EncodeCrossCrate::Yes, experimental!(unix_sigpipe)
-    ),
     ungated!(start, Normal, template!(Word), WarnFollowing, EncodeCrossCrate::No),
     ungated!(no_start, CrateLevel, template!(Word), WarnFollowing, EncodeCrossCrate::No),
     ungated!(no_main, CrateLevel, template!(Word), WarnFollowing, EncodeCrossCrate::No),
@@ -448,6 +445,9 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         debugger_visualizer, Normal,
         template!(List: r#"natvis_file = "...", gdb_script_file = "...""#),
         DuplicatesOk, EncodeCrossCrate::No
+    ),
+    ungated!(collapse_debuginfo, Normal, template!(List: "no|external|yes"), ErrorFollowing,
+        EncodeCrossCrate::Yes
     ),
 
     // ==========================================================================
@@ -515,22 +515,22 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         EncodeCrossCrate::Yes, experimental!(deprecated_safe),
     ),
 
-    // `#[collapse_debuginfo]`
-    gated!(
-        collapse_debuginfo, Normal, template!(Word, List: "no|external|yes"), ErrorFollowing,
-        EncodeCrossCrate::No, experimental!(collapse_debuginfo)
-    ),
-
     // RFC 2397
     gated!(
         do_not_recommend, Normal, template!(Word), WarnFollowing,
-        EncodeCrossCrate::No, experimental!(do_not_recommend)
+        EncodeCrossCrate::Yes, experimental!(do_not_recommend)
     ),
 
     // `#[cfi_encoding = ""]`
     gated!(
         cfi_encoding, Normal, template!(NameValueStr: "encoding"), ErrorPreceding,
         EncodeCrossCrate::Yes, experimental!(cfi_encoding)
+    ),
+
+    // `#[coroutine]` attribute to be applied to closures to make them coroutines instead
+    gated!(
+        coroutine, Normal, template!(Word), ErrorFollowing,
+        EncodeCrossCrate::No, coroutines, experimental!(coroutines)
     ),
 
     // ==========================================================================
@@ -797,7 +797,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     // ==========================================================================
     gated!(
         lang, Normal, template!(NameValueStr: "name"), DuplicatesOk, EncodeCrossCrate::No, lang_items,
-        "language items are subject to change",
+        "lang items are subject to change",
     ),
     rustc_attr!(
         rustc_pass_by_value, Normal, template!(Word), ErrorFollowing,
@@ -1081,7 +1081,7 @@ pub fn is_builtin_attr_name(name: Symbol) -> bool {
 /// This means it can be used cross crate.
 pub fn encode_cross_crate(name: Symbol) -> bool {
     if let Some(attr) = BUILTIN_ATTRIBUTE_MAP.get(&name) {
-        if attr.encode_cross_crate == EncodeCrossCrate::Yes { true } else { false }
+        attr.encode_cross_crate == EncodeCrossCrate::Yes
     } else {
         true
     }

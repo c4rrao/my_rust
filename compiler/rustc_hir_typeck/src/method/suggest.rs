@@ -22,12 +22,8 @@ use rustc_hir::lang_items::LangItem;
 use rustc_hir::PatKind::Binding;
 use rustc_hir::PathSegment;
 use rustc_hir::{ExprKind, Node, QPath};
-use rustc_infer::infer::{
-    self,
-    type_variable::{TypeVariableOrigin, TypeVariableOriginKind},
-    RegionVariableOrigin,
-};
-use rustc_middle::infer::unify_key::{ConstVariableOrigin, ConstVariableOriginKind};
+use rustc_infer::infer::{self, type_variable::TypeVariableOrigin, RegionVariableOrigin};
+use rustc_middle::infer::unify_key::ConstVariableOrigin;
 use rustc_middle::ty::fast_reject::DeepRejectCtxt;
 use rustc_middle::ty::fast_reject::{simplify_type, TreatParams};
 use rustc_middle::ty::print::{with_crate_prefix, with_forced_trimmed_paths};
@@ -82,13 +78,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         let trait_ref = ty::TraitRef::new(
                             tcx,
                             fn_once,
-                            [
-                                ty,
-                                self.next_ty_var(TypeVariableOrigin {
-                                    kind: TypeVariableOriginKind::MiscVariable,
-                                    span,
-                                }),
-                            ],
+                            [ty, self.next_ty_var(TypeVariableOrigin { param_def_id: None, span })],
                         );
                         let poly_trait_ref = ty::Binder::dummy(trait_ref);
                         let obligation = Obligation::misc(
@@ -135,11 +125,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let Some(arg_ty) = args[0].as_type() else {
                     return false;
                 };
-                let ty::Param(param) = arg_ty.kind() else {
+                let ty::Param(param) = *arg_ty.kind() else {
                     return false;
                 };
                 // Is `generic_param` the same as the arg for this trait predicate?
-                generic_param.index == generics.type_param(&param, tcx).index
+                generic_param.index == generics.type_param(param, tcx).index
             } else {
                 false
             }
@@ -166,10 +156,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return false;
         }
 
-        match ty.peel_refs().kind() {
+        match *ty.peel_refs().kind() {
             ty::Param(param) => {
                 let generics = self.tcx.generics_of(self.body_id);
-                let generic_param = generics.type_param(&param, self.tcx);
+                let generic_param = generics.type_param(param, self.tcx);
                 for unsatisfied in unsatisfied_predicates.iter() {
                     // The parameter implements `IntoIterator`
                     // but it has called a method that requires it to implement `Iterator`
@@ -529,16 +519,44 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Applicability::MachineApplicable,
             );
         }
-        if let ty::RawPtr(_, _) = &rcvr_ty.kind() {
-            err.note(
-                "try using `<*const T>::as_ref()` to get a reference to the \
-                 type behind the pointer: https://doc.rust-lang.org/std/\
-                 primitive.pointer.html#method.as_ref",
+
+        // on pointers, check if the method would exist on a reference
+        if let SelfSource::MethodCall(rcvr_expr) = source
+            && let ty::RawPtr(ty, ptr_mutbl) = *rcvr_ty.kind()
+            && let Ok(pick) = self.lookup_probe_for_diagnostic(
+                item_name,
+                Ty::new_ref(tcx, ty::Region::new_error_misc(tcx), ty, ptr_mutbl),
+                self.tcx.hir().expect_expr(self.tcx.parent_hir_id(rcvr_expr.hir_id)),
+                ProbeScope::TraitsInScope,
+                None,
+            )
+            && let ty::Ref(_, _, sugg_mutbl) = *pick.self_ty.kind()
+            && (sugg_mutbl.is_not() || ptr_mutbl.is_mut())
+        {
+            let (method, method_anchor) = match sugg_mutbl {
+                Mutability::Not => {
+                    let method_anchor = match ptr_mutbl {
+                        Mutability::Not => "as_ref",
+                        Mutability::Mut => "as_ref-1",
+                    };
+                    ("as_ref", method_anchor)
+                }
+                Mutability::Mut => ("as_mut", "as_mut"),
+            };
+            err.span_note(
+                tcx.def_span(pick.item.def_id),
+                format!("the method `{item_name}` exists on the type `{ty}`", ty = pick.self_ty),
             );
-            err.note(
-                "using `<*const T>::as_ref()` on a pointer which is unaligned or points \
-                 to invalid or uninitialized memory is undefined behavior",
-            );
+            let mut_str = ptr_mutbl.ptr_str();
+            err.note(format!(
+                "you might want to use the unsafe method `<*{mut_str} T>::{method}` to get \
+                an optional reference to the value behind the pointer"
+            ));
+            err.note(format!(
+                "read the documentation for `<*{mut_str} T>::{method}` and ensure you satisfy its \
+                safety preconditions before calling it to avoid undefined behavior: \
+                https://doc.rust-lang.org/std/primitive.pointer.html#method.{method_anchor}"
+            ));
         }
 
         let mut ty_span = match rcvr_ty.kind() {
@@ -1243,7 +1261,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .map(|expr| {
                         self.node_ty_opt(expr.hir_id).unwrap_or_else(|| {
                             self.next_ty_var(TypeVariableOrigin {
-                                kind: TypeVariableOriginKind::MiscVariable,
+                                param_def_id: None,
                                 span: expr.span,
                             })
                         })
@@ -1826,23 +1844,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         has_unsuggestable_args = true;
                         match arg.unpack() {
                             GenericArgKind::Lifetime(_) => self
-                                .next_region_var(RegionVariableOrigin::MiscVariable(
-                                    rustc_span::DUMMY_SP,
-                                ))
+                                .next_region_var(RegionVariableOrigin::MiscVariable(DUMMY_SP))
                                 .into(),
                             GenericArgKind::Type(_) => self
                                 .next_ty_var(TypeVariableOrigin {
-                                    span: rustc_span::DUMMY_SP,
-                                    kind: TypeVariableOriginKind::MiscVariable,
+                                    span: DUMMY_SP,
+                                    param_def_id: None,
                                 })
                                 .into(),
                             GenericArgKind::Const(arg) => self
                                 .next_const_var(
                                     arg.ty(),
-                                    ConstVariableOrigin {
-                                        span: rustc_span::DUMMY_SP,
-                                        kind: ConstVariableOriginKind::MiscVariable,
-                                    },
+                                    ConstVariableOrigin { span: DUMMY_SP, param_def_id: None },
                                 )
                                 .into(),
                         }
@@ -2740,7 +2753,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let SelfSource::QPath(ty) = self_source else {
             return;
         };
-        for (deref_ty, _) in self.autoderef(rustc_span::DUMMY_SP, rcvr_ty).skip(1) {
+        for (deref_ty, _) in self.autoderef(DUMMY_SP, rcvr_ty).skip(1) {
             if let Ok(pick) = self.probe_for_name(
                 Mode::Path,
                 item_name,
@@ -3219,9 +3232,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .sort_by_key(|&info| (!info.def_id.is_local(), self.tcx.def_path_str(info.def_id)));
             candidates.dedup();
 
-            let param_type = match rcvr_ty.kind() {
+            let param_type = match *rcvr_ty.kind() {
                 ty::Param(param) => Some(param),
-                ty::Ref(_, ty, _) => match ty.kind() {
+                ty::Ref(_, ty, _) => match *ty.kind() {
                     ty::Param(param) => Some(param),
                     _ => None,
                 },
@@ -3278,14 +3291,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 param.name.ident(),
                             ));
                             let bounds_span = hir_generics.bounds_span_for_suggestions(def_id);
-                            if rcvr_ty.is_ref() && param.is_impl_trait() && bounds_span.is_some() {
+                            if rcvr_ty.is_ref()
+                                && param.is_impl_trait()
+                                && let Some((bounds_span, _)) = bounds_span
+                            {
                                 err.multipart_suggestions(
                                     msg,
                                     candidates.iter().map(|t| {
                                         vec![
                                             (param.span.shrink_to_lo(), "(".to_string()),
                                             (
-                                                bounds_span.unwrap(),
+                                                bounds_span,
                                                 format!(" + {})", self.tcx.def_path_str(t.def_id)),
                                             ),
                                         ]
@@ -3295,32 +3311,46 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 return;
                             }
 
-                            let (sp, introducer) = if let Some(span) = bounds_span {
-                                (span, Introducer::Plus)
-                            } else if let Some(colon_span) = param.colon_span {
-                                (colon_span.shrink_to_hi(), Introducer::Nothing)
-                            } else if param.is_impl_trait() {
-                                (param.span.shrink_to_hi(), Introducer::Plus)
-                            } else {
-                                (param.span.shrink_to_hi(), Introducer::Colon)
-                            };
+                            let (sp, introducer, open_paren_sp) =
+                                if let Some((span, open_paren_sp)) = bounds_span {
+                                    (span, Introducer::Plus, open_paren_sp)
+                                } else if let Some(colon_span) = param.colon_span {
+                                    (colon_span.shrink_to_hi(), Introducer::Nothing, None)
+                                } else if param.is_impl_trait() {
+                                    (param.span.shrink_to_hi(), Introducer::Plus, None)
+                                } else {
+                                    (param.span.shrink_to_hi(), Introducer::Colon, None)
+                                };
 
-                            err.span_suggestions(
-                                sp,
+                            let all_suggs = candidates.iter().map(|cand| {
+                                let suggestion = format!(
+                                    "{} {}",
+                                    match introducer {
+                                        Introducer::Plus => " +",
+                                        Introducer::Colon => ":",
+                                        Introducer::Nothing => "",
+                                    },
+                                    self.tcx.def_path_str(cand.def_id)
+                                );
+
+                                let mut suggs = vec![];
+
+                                if let Some(open_paren_sp) = open_paren_sp {
+                                    suggs.push((open_paren_sp, "(".to_string()));
+                                    suggs.push((sp, format!("){suggestion}")));
+                                } else {
+                                    suggs.push((sp, suggestion));
+                                }
+
+                                suggs
+                            });
+
+                            err.multipart_suggestions(
                                 msg,
-                                candidates.iter().map(|t| {
-                                    format!(
-                                        "{} {}",
-                                        match introducer {
-                                            Introducer::Plus => " +",
-                                            Introducer::Colon => ":",
-                                            Introducer::Nothing => "",
-                                        },
-                                        self.tcx.def_path_str(t.def_id)
-                                    )
-                                }),
+                                all_suggs,
                                 Applicability::MaybeIncorrect,
                             );
+
                             return;
                         }
                         Node::Item(hir::Item {
@@ -3416,7 +3446,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 } else {
                                     param_type.map_or_else(
                                         || "implement".to_string(), // FIXME: it might only need to be imported into scope, not implemented.
-                                        ToString::to_string,
+                                        |p| p.to_string(),
                                     )
                                 },
                             },

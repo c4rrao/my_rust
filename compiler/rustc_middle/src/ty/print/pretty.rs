@@ -16,6 +16,7 @@ use rustc_hir::def::{self, CtorKind, DefKind, Namespace};
 use rustc_hir::def_id::{DefIdMap, DefIdSet, ModDefId, CRATE_DEF_ID, LOCAL_CRATE};
 use rustc_hir::definitions::{DefKey, DefPathDataName};
 use rustc_hir::LangItem;
+use rustc_macros::Lift;
 use rustc_session::cstore::{ExternCrate, ExternCrateSource};
 use rustc_session::Limit;
 use rustc_span::symbol::{kw, Ident, Symbol};
@@ -667,14 +668,11 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             ty::Int(t) => p!(write("{}", t.name_str())),
             ty::Uint(t) => p!(write("{}", t.name_str())),
             ty::Float(t) => p!(write("{}", t.name_str())),
+            ty::Pat(ty, pat) => {
+                p!("(", print(ty), ") is ", write("{pat:?}"))
+            }
             ty::RawPtr(ty, mutbl) => {
-                p!(write(
-                    "*{} ",
-                    match mutbl {
-                        hir::Mutability::Mut => "mut",
-                        hir::Mutability::Not => "const",
-                    }
-                ));
+                p!(write("*{} ", mutbl.ptr_str()));
                 p!(print(ty))
             }
             ty::Ref(r, ty, mutbl) => {
@@ -1279,7 +1277,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
 
     fn pretty_print_inherent_projection(
         &mut self,
-        alias_ty: &ty::AliasTy<'tcx>,
+        alias_ty: ty::AliasTy<'tcx>,
     ) -> Result<(), PrintError> {
         let def_key = self.tcx().def_key(alias_ty.def_id);
         self.path_generic_args(
@@ -3207,7 +3205,7 @@ define_print_and_forward_display! {
 
     ty::AliasTy<'tcx> {
         if let DefKind::Impl { of_trait: false } = cx.tcx().def_kind(cx.tcx().parent(self.def_id)) {
-            p!(pretty_print_inherent_projection(self))
+            p!(pretty_print_inherent_projection(*self))
         } else {
             // If we're printing verbosely, or don't want to invoke queries
             // (`is_impl_trait_in_trait`), then fall back to printing the def path.

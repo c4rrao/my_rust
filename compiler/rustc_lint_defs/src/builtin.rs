@@ -38,6 +38,7 @@ declare_lint_pass! {
         DEPRECATED_CFG_ATTR_CRATE_TYPE_NAME,
         DEPRECATED_IN_FUTURE,
         DEPRECATED_WHERE_CLAUSE_LOCATION,
+        DEREFERENCING_MUT_BINDING,
         DUPLICATE_MACRO_ATTRIBUTES,
         ELIDED_LIFETIMES_IN_ASSOCIATED_CONSTANT,
         ELIDED_LIFETIMES_IN_PATHS,
@@ -68,6 +69,7 @@ declare_lint_pass! {
         MISSING_FRAGMENT_SPECIFIER,
         MUST_NOT_SUSPEND,
         NAMED_ARGUMENTS_USED_POSITIONALLY,
+        NEVER_TYPE_FALLBACK_FLOWING_INTO_UNSAFE,
         NON_CONTIGUOUS_RANGE_ENDPOINTS,
         NON_EXHAUSTIVE_OMITTED_PATTERNS,
         ORDER_DEPENDENT_TRAIT_OBJECTS,
@@ -79,6 +81,7 @@ declare_lint_pass! {
         PROC_MACRO_BACK_COMPAT,
         PROC_MACRO_DERIVE_RESOLUTION_FALLBACK,
         PUB_USE_OF_PRIVATE_EXTERN_CRATE,
+        REDUNDANT_LIFETIMES,
         REFINING_IMPL_TRAIT_INTERNAL,
         REFINING_IMPL_TRAIT_REACHABLE,
         RENAMED_AND_REMOVED_LINTS,
@@ -99,6 +102,7 @@ declare_lint_pass! {
         TYVAR_BEHIND_RAW_POINTER,
         UNCONDITIONAL_PANIC,
         UNCONDITIONAL_RECURSION,
+        UNCOVERED_PARAM_IN_PROJECTION,
         UNDEFINED_NAKED_FUNCTION_ABI,
         UNEXPECTED_CFGS,
         UNFULFILLED_LINT_EXPECTATIONS,
@@ -1627,6 +1631,42 @@ declare_lint! {
 }
 
 declare_lint! {
+    /// The `dereferencing_mut_binding` lint detects a `mut x` pattern that resets the binding mode,
+    /// as this behavior will change in rust 2024.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// # #![warn(dereferencing_mut_binding)]
+    /// let x = Some(123u32);
+    /// let _y = match &x {
+    ///     Some(mut x) => {
+    ///         x += 1;
+    ///         x
+    ///     }
+    ///     None => 0,
+    /// };
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Without the `mut`, `x` would have type `&u32`. Pre-2024, adding `mut` makes `x` have type
+    /// `u32`, which was deemed surprising. After edition 2024, adding `mut` will not change the
+    /// type of `x`. This lint warns users of editions before 2024 to update their code.
+    pub DEREFERENCING_MUT_BINDING,
+    Allow,
+    "detects `mut x` bindings that change the type of `x`",
+    @feature_gate = sym::mut_preserve_binding_mode_2024;
+    // FIXME uncomment below upon stabilization
+    /*@future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
+        reference: "123076",
+    };*/
+}
+
+declare_lint! {
     /// The `unconditional_recursion` lint detects functions that cannot
     /// return without calling themselves.
     ///
@@ -1705,6 +1745,33 @@ declare_lint! {
     pub UNUSED_LIFETIMES,
     Allow,
     "detects lifetime parameters that are never used"
+}
+
+declare_lint! {
+    /// The `redundant_lifetimes` lint detects lifetime parameters that are
+    /// redundant because they are equal to another named lifetime.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #[deny(redundant_lifetimes)]
+    ///
+    /// // `'a = 'static`, so all usages of `'a` can be replaced with `'static`
+    /// pub fn bar<'a: 'static>() {}
+    ///
+    /// // `'a = 'b`, so all usages of `'b` can be replaced with `'a`
+    /// pub fn bar<'a: 'b, 'b: 'a>() {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Unused lifetime parameters may signal a mistake or unfinished code.
+    /// Consider removing the parameter.
+    pub REDUNDANT_LIFETIMES,
+    Allow,
+    "detects lifetime parameters that are redundant because they are equal to some other named lifetime"
 }
 
 declare_lint! {
@@ -4180,6 +4247,85 @@ declare_lint! {
 }
 
 declare_lint! {
+    /// The `never_type_fallback_flowing_into_unsafe` lint detects cases where never type fallback
+    /// affects unsafe function calls.
+    ///
+    /// ### Never type fallback
+    ///
+    /// When the compiler sees a value of type [`!`] it implicitly inserts a coercion (if possible),
+    /// to allow type check to infer any type:
+    ///
+    /// ```ignore (illustrative-and-has-placeholders)
+    /// // this
+    /// let x: u8 = panic!();
+    ///
+    /// // is (essentially) turned by the compiler into
+    /// let x: u8 = absurd(panic!());
+    ///
+    /// // where absurd is a function with the following signature
+    /// // (it's sound, because `!` always marks unreachable code):
+    /// fn absurd<T>(_: !) -> T { ... }
+    // FIXME: use `core::convert::absurd` here instead, once it's merged
+    /// ```
+    ///
+    /// While it's convenient to be able to use non-diverging code in one of the branches (like
+    /// `if a { b } else { return }`) this could lead to compilation errors:
+    ///
+    /// ```compile_fail
+    /// // this
+    /// { panic!() };
+    ///
+    /// // gets turned into this
+    /// { absurd(panic!()) }; // error: can't infer the type of `absurd`
+    /// ```
+    ///
+    /// To prevent such errors, compiler remembers where it inserted `absurd` calls, and if it
+    /// can't infer their type, it sets the type to fallback. `{ absurd::<Fallback>(panic!()) };`.
+    /// This is what is known as "never type fallback".
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #![deny(never_type_fallback_flowing_into_unsafe)]
+    /// fn main() {
+    ///     if true {
+    ///         // return has type `!` which, is some cases, causes never type fallback
+    ///         return
+    ///     } else {
+    ///         // `zeroed` is an unsafe function, which returns an unbounded type
+    ///         unsafe { std::mem::zeroed() }
+    ///     };
+    ///     // depending on the fallback, `zeroed` may create `()` (which is completely sound),
+    ///     // or `!` (which is instant undefined behavior)
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Due to historic reasons never type fallback was `()`, meaning that `!` got spontaneously
+    /// coerced to `()`. There are plans to change that, but they may make the code such as above
+    /// unsound. Instead of depending on the fallback, you should specify the type explicitly:
+    /// ```
+    /// if true {
+    ///     return
+    /// } else {
+    ///     // type is explicitly specified, fallback can't hurt us no more
+    ///     unsafe { std::mem::zeroed::<()>() }
+    /// };
+    /// ```
+    ///
+    /// See [Tracking Issue for making `!` fall back to `!`](https://github.com/rust-lang/rust/issues/123748).
+    ///
+    /// [`!`]: https://doc.rust-lang.org/core/primitive.never.html
+    /// [`()`]: https://doc.rust-lang.org/core/primitive.unit.html
+    pub NEVER_TYPE_FALLBACK_FLOWING_INTO_UNSAFE,
+    Warn,
+    "never type fallback affecting unsafe function calls"
+}
+
+declare_lint! {
     /// The `byte_slice_in_packed_struct_with_derive` lint detects cases where a byte slice field
     /// (`[u8]`) or string slice field (`str`) is used in a `packed` struct that derives one or
     /// more built-in traits.
@@ -4311,7 +4457,6 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust,compile_fail
-    /// # #![feature(type_privacy_lints)]
     /// # #![allow(unused)]
     /// #![deny(unnameable_types)]
     /// mod m {
@@ -4328,10 +4473,14 @@ declare_lint! {
     ///
     /// It is often expected that if you can obtain an object of type `T`, then
     /// you can name the type `T` as well, this lint attempts to enforce this rule.
+    /// The recommended action is to either reexport the type properly to make it nameable,
+    /// or document that users are not supposed to be able to name it for one reason or another.
+    ///
+    /// Besides types, this lint applies to traits because traits can also leak through signatures,
+    /// and you may obtain objects of their `dyn Trait` or `impl Trait` types.
     pub UNNAMEABLE_TYPES,
     Allow,
     "effective visibility of a type is larger than the area in which it can be named",
-    @feature_gate = sym::type_privacy_lints;
 }
 
 declare_lint! {
@@ -4672,4 +4821,69 @@ declare_lint! {
         reference: "issue #71871 <https://github.com/rust-lang/rust/issues/71871>",
     };
     crate_level_only
+}
+
+declare_lint! {
+    /// The `uncovered_param_in_projection` lint detects a violation of one of Rust's orphan rules for
+    /// foreign trait implementations that concerns the use of type parameters inside trait associated
+    /// type paths ("projections") whose output may not be a local type that is mistakenly considered
+    /// to "cover" said parameters which is **unsound** and which may be rejected by a future version
+    /// of the compiler.
+    ///
+    /// Originally reported in [#99554].
+    ///
+    /// [#99554]: https://github.com/rust-lang/rust/issues/99554
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (dependent)
+    /// // dependency.rs
+    /// #![crate_type = "lib"]
+    ///
+    /// pub trait Trait<T, U> {}
+    /// ```
+    ///
+    /// ```edition2021,ignore (needs dependency)
+    /// // dependent.rs
+    /// trait Identity {
+    ///     type Output;
+    /// }
+    ///
+    /// impl<T> Identity for T {
+    ///     type Output = T;
+    /// }
+    ///
+    /// struct Local;
+    ///
+    /// impl<T> dependency::Trait<Local, T> for <T as Identity>::Output {}
+    ///
+    /// fn main() {}
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// warning[E0210]: type parameter `T` must be covered by another type when it appears before the first local type (`Local`)
+    ///   --> dependent.rs:11:6
+    ///    |
+    /// 11 | impl<T> dependency::Trait<Local, T> for <T as Identity>::Output {}
+    ///    |      ^ type parameter `T` must be covered by another type when it appears before the first local type (`Local`)
+    ///    |
+    ///    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    ///    = note: for more information, see issue #124559 <https://github.com/rust-lang/rust/issues/124559>
+    ///    = note: implementing a foreign trait is only possible if at least one of the types for which it is implemented is local, and no uncovered type parameters appear before that first local type
+    ///    = note: in this case, 'before' refers to the following order: `impl<..> ForeignTrait<T1, ..., Tn> for T0`, where `T0` is the first and `Tn` is the last
+    ///    = note: `#[warn(uncovered_param_in_projection)]` on by default
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// FIXME(fmease): Write explainer.
+    pub UNCOVERED_PARAM_IN_PROJECTION,
+    Warn,
+    "impl contains type parameters that are not covered",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
+        reference: "issue #124559 <https://github.com/rust-lang/rust/issues/124559>",
+    };
 }

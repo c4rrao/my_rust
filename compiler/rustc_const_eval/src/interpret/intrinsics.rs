@@ -69,6 +69,10 @@ pub(crate) fn eval_nullary_intrinsic<'tcx>(
             ty::Alias(..) | ty::Param(_) | ty::Placeholder(_) | ty::Infer(_) => {
                 throw_inval!(TooGeneric)
             }
+            ty::Pat(_, pat) => match **pat {
+                ty::PatternKind::Range { .. } => ConstValue::from_target_usize(0u64, &tcx),
+                // Future pattern kinds may have more variants
+            },
             ty::Bound(_, _) => bug!("bound ty during ctfe"),
             ty::Bool
             | ty::Char
@@ -109,10 +113,6 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     ) -> InterpResult<'tcx, bool> {
         let instance_args = instance.args;
         let intrinsic_name = self.tcx.item_name(instance.def_id());
-        let Some(ret) = ret else {
-            // We don't support any intrinsic without return place.
-            return Ok(false);
-        };
 
         match intrinsic_name {
             sym::caller_location => {
@@ -169,7 +169,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let ty = instance_args.type_at(0);
                 let layout = self.layout_of(ty)?;
                 let val = self.read_scalar(&args[0])?;
-                let out_val = self.numeric_intrinsic(intrinsic_name, val, layout)?;
+
+                let out_val = self.numeric_intrinsic(intrinsic_name, val, layout, dest.layout)?;
                 self.write_scalar(out_val, dest)?;
             }
             sym::saturating_add | sym::saturating_sub => {
@@ -196,12 +197,15 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             sym::rotate_left | sym::rotate_right => {
                 // rotate_left: (X << (S % BW)) | (X >> ((BW - S) % BW))
                 // rotate_right: (X << ((BW - S) % BW)) | (X >> (S % BW))
-                let layout = self.layout_of(instance_args.type_at(0))?;
+                let layout_val = self.layout_of(instance_args.type_at(0))?;
                 let val = self.read_scalar(&args[0])?;
-                let val_bits = val.to_bits(layout.size)?;
+                let val_bits = val.to_bits(layout_val.size)?;
+
+                let layout_raw_shift = self.layout_of(self.tcx.types.u32)?;
                 let raw_shift = self.read_scalar(&args[1])?;
-                let raw_shift_bits = raw_shift.to_bits(layout.size)?;
-                let width_bits = u128::from(layout.size.bits());
+                let raw_shift_bits = raw_shift.to_bits(layout_raw_shift.size)?;
+
+                let width_bits = u128::from(layout_val.size.bits());
                 let shift_bits = raw_shift_bits % width_bits;
                 let inv_shift_bits = (width_bits - shift_bits) % width_bits;
                 let result_bits = if intrinsic_name == sym::rotate_left {
@@ -209,8 +213,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 } else {
                     (val_bits >> shift_bits) | (val_bits << inv_shift_bits)
                 };
-                let truncated_bits = self.truncate(result_bits, layout);
-                let result = Scalar::from_uint(truncated_bits, layout.size);
+                let truncated_bits = self.truncate(result_bits, layout_val);
+                let result = Scalar::from_uint(truncated_bits, layout_val.size);
                 self.write_scalar(result, dest)?;
             }
             sym::copy => {
@@ -368,7 +372,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     };
 
                     M::panic_nounwind(self, &msg)?;
-                    // Skip the `go_to_block` at the end.
+                    // Skip the `return_to_block` at the end (we panicked, we do not return).
                     return Ok(true);
                 }
             }
@@ -406,7 +410,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 }
                 self.copy_op(&self.project_index(&input, index)?, dest)?;
             }
-            sym::likely | sym::unlikely | sym::black_box => {
+            sym::black_box => {
                 // These just return their argument
                 self.copy_op(&args[0], dest)?;
             }
@@ -429,11 +433,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 self.write_scalar(Scalar::from_target_usize(align.bytes(), self), dest)?;
             }
 
+            // Unsupported intrinsic: skip the return_to_block below.
             _ => return Ok(false),
         }
 
         trace!("{:?}", self.dump_place(&dest.clone().into()));
-        self.go_to_block(ret);
+        self.return_to_block(ret)?;
         Ok(true)
     }
 
@@ -468,6 +473,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         name: Symbol,
         val: Scalar<M::Provenance>,
         layout: TyAndLayout<'tcx>,
+        ret_layout: TyAndLayout<'tcx>,
     ) -> InterpResult<'tcx, Scalar<M::Provenance>> {
         assert!(layout.ty.is_integral(), "invalid type for numeric intrinsic: {}", layout.ty);
         let bits = val.to_bits(layout.size)?;
@@ -479,11 +485,17 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             }
             sym::ctlz | sym::ctlz_nonzero => u128::from(bits.leading_zeros()) - extra,
             sym::cttz | sym::cttz_nonzero => u128::from((bits << extra).trailing_zeros()) - extra,
-            sym::bswap => (bits << extra).swap_bytes(),
-            sym::bitreverse => (bits << extra).reverse_bits(),
+            sym::bswap => {
+                assert_eq!(layout, ret_layout);
+                (bits << extra).swap_bytes()
+            }
+            sym::bitreverse => {
+                assert_eq!(layout, ret_layout);
+                (bits << extra).reverse_bits()
+            }
             _ => bug!("not a numeric intrinsic: {}", name),
         };
-        Ok(Scalar::from_uint(bits_out, layout.size))
+        Ok(Scalar::from_uint(bits_out, ret_layout.size))
     }
 
     pub fn exact_div(

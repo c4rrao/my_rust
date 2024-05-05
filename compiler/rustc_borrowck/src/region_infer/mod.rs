@@ -11,6 +11,7 @@ use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::outlives::test_type_match;
 use rustc_infer::infer::region_constraints::{GenericKind, VarInfos, VerifyBound, VerifyIfEq};
 use rustc_infer::infer::{InferCtxt, NllRegionVariableOrigin, RegionVariableOrigin};
+use rustc_middle::bug;
 use rustc_middle::mir::{
     BasicBlock, Body, ClosureOutlivesRequirement, ClosureOutlivesSubject, ClosureOutlivesSubjectTy,
     ClosureRegionRequirements, ConstraintCategory, Local, Location, ReturnConstraint,
@@ -1562,7 +1563,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
         // Because this free region must be in the ROOT universe, we
         // know it cannot contain any bound universes.
-        assert!(self.scc_universes[longer_fr_scc] == ty::UniverseIndex::ROOT);
+        assert!(self.scc_universes[longer_fr_scc].is_root());
         debug_assert!(self.scc_values.placeholders_contained_in(longer_fr_scc).next().is_none());
 
         // Only check all of the relations for the main representative of each

@@ -109,7 +109,7 @@ macro_rules! maybe_recover_from_interpolated_ty_qpath {
     ($self: expr, $allow_qpath_recovery: expr) => {
         if $allow_qpath_recovery
             && $self.may_recover()
-            && $self.look_ahead(1, |t| t == &token::ModSep)
+            && $self.look_ahead(1, |t| t == &token::PathSep)
             && let token::Interpolated(nt) = &$self.token.kind
             && let token::NtTy(ty) = &nt.0
         {
@@ -162,7 +162,6 @@ pub struct Parser<'a> {
     ///
     /// See the comments in the `parse_path_segment` function for more details.
     unmatched_angle_bracket_count: u16,
-    max_angle_bracket_count: u16,
     angle_bracket_nesting: u16,
 
     last_unexpected_token_span: Option<Span>,
@@ -179,7 +178,7 @@ pub struct Parser<'a> {
 
 // This type is used a lot, e.g. it's cloned when matching many declarative macro rules with nonterminals. Make sure
 // it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 rustc_data_structures::static_assert_size!(Parser<'_>, 264);
 
 /// Stores span information about a closure.
@@ -430,7 +429,6 @@ impl<'a> Parser<'a> {
             num_bump_calls: 0,
             break_last_token: false,
             unmatched_angle_bracket_count: 0,
-            max_angle_bracket_count: 0,
             angle_bracket_nesting: 0,
             last_unexpected_token_span: None,
             subparser_name,
@@ -778,7 +776,6 @@ impl<'a> Parser<'a> {
         if ate {
             // See doc comment for `unmatched_angle_bracket_count`.
             self.unmatched_angle_bracket_count += 1;
-            self.max_angle_bracket_count += 1;
             debug!("eat_lt: (increment) count={:?}", self.unmatched_angle_bracket_count);
         }
         ate
@@ -898,6 +895,7 @@ impl<'a> Parser<'a> {
                             }
 
                             // Attempt to keep parsing if it was an omitted separator.
+                            self.last_unexpected_token_span = None;
                             match f(self) {
                                 Ok(t) => {
                                     // Parsed successfully, therefore most probably the code only
@@ -1254,8 +1252,6 @@ impl<'a> Parser<'a> {
     fn parse_const_block(&mut self, span: Span, pat: bool) -> PResult<'a, P<Expr>> {
         if pat {
             self.psess.gated_spans.gate(sym::inline_const_pat, span);
-        } else {
-            self.psess.gated_spans.gate(sym::inline_const, span);
         }
         self.eat_keyword(kw::Const);
         let (attrs, blk) = self.parse_inner_attrs_and_block()?;
@@ -1532,7 +1528,7 @@ impl<'a> Parser<'a> {
 
     /// `::{` or `::*`
     fn is_import_coupler(&mut self) -> bool {
-        self.check(&token::ModSep)
+        self.check(&token::PathSep)
             && self.look_ahead(1, |t| {
                 *t == token::OpenDelim(Delimiter::Brace) || *t == token::BinOp(token::Star)
             })

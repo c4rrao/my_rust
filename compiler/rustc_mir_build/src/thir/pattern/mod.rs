@@ -65,7 +65,14 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
         // we wrap the unadjusted pattern in `PatKind::Deref` repeatedly, consuming the
         // adjustments in *reverse order* (last-in-first-out, so that the last `Deref` inserted
         // gets the least-dereferenced type).
-        let unadjusted_pat = self.lower_pattern_unadjusted(pat);
+        let unadjusted_pat = match pat.kind {
+            hir::PatKind::Ref(inner, _)
+                if self.typeck_results.skipped_ref_pats().contains(pat.hir_id) =>
+            {
+                self.lower_pattern(inner)
+            }
+            _ => self.lower_pattern_unadjusted(pat),
+        };
         self.typeck_results.pat_adjustments().get(pat.hir_id).unwrap_or(&vec![]).iter().rev().fold(
             unadjusted_pat,
             |pat: Box<_>, ref_ty| {
@@ -257,7 +264,9 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
             }
 
             hir::PatKind::Deref(subpattern) => {
-                PatKind::DerefPattern { subpattern: self.lower_pattern(subpattern) }
+                let mutable = self.typeck_results.pat_has_ref_mut_binding(subpattern);
+                let mutability = if mutable { hir::Mutability::Mut } else { hir::Mutability::Not };
+                PatKind::DerefPattern { subpattern: self.lower_pattern(subpattern), mutability }
             }
             hir::PatKind::Ref(subpattern, _) | hir::PatKind::Box(subpattern) => {
                 PatKind::Deref { subpattern: self.lower_pattern(subpattern) }

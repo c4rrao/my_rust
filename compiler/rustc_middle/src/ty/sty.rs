@@ -17,13 +17,14 @@ use rustc_errors::{DiagArgValue, ErrorGuaranteed, IntoDiagArg, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
-use rustc_macros::HashStable;
+use rustc_macros::{HashStable, Lift, TyDecodable, TyEncodable, TypeFoldable};
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
 use rustc_target::spec::abi::{self, Abi};
 use std::assert_matches::debug_assert_matches;
 use std::borrow::Cow;
+use std::iter;
 use std::ops::{ControlFlow, Deref, Range};
 use ty::util::IntTypeExt;
 
@@ -771,7 +772,7 @@ impl<'tcx> CoroutineArgs<'tcx> {
     }
 }
 
-#[derive(Debug, Copy, Clone, HashStable)]
+#[derive(Debug, Copy, Clone, HashStable, TypeFoldable, TypeVisitable)]
 pub enum UpvarArgs<'tcx> {
     Closure(GenericArgsRef<'tcx>),
     Coroutine(GenericArgsRef<'tcx>),
@@ -1379,7 +1380,7 @@ impl<'tcx> ParamTy {
         Ty::new_param(tcx, self.index, self.name)
     }
 
-    pub fn span_from_generics(&self, tcx: TyCtxt<'tcx>, item_with_generics: DefId) -> Span {
+    pub fn span_from_generics(self, tcx: TyCtxt<'tcx>, item_with_generics: DefId) -> Span {
         let generics = tcx.generics_of(item_with_generics);
         let type_param = generics.type_param(self, tcx);
         tcx.def_span(type_param.def_id)
@@ -1523,6 +1524,11 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
+    pub fn new_pat(tcx: TyCtxt<'tcx>, base: Ty<'tcx>, pat: ty::Pattern<'tcx>) -> Ty<'tcx> {
+        Ty::new(tcx, Pat(base, pat))
+    }
+
+    #[inline]
     pub fn new_opaque(tcx: TyCtxt<'tcx>, def_id: DefId, args: GenericArgsRef<'tcx>) -> Ty<'tcx> {
         Ty::new_alias(tcx, ty::Opaque, AliasTy::new(tcx, def_id, args))
     }
@@ -1624,13 +1630,7 @@ impl<'tcx> Ty<'tcx> {
 
     #[inline]
     pub fn new_adt(tcx: TyCtxt<'tcx>, def: AdtDef<'tcx>, args: GenericArgsRef<'tcx>) -> Ty<'tcx> {
-        debug_assert_eq!(
-            tcx.generics_of(def.did()).count(),
-            args.len(),
-            "wrong number of args for ADT: {:#?} vs {:#?}",
-            tcx.generics_of(def.did()).params,
-            args
-        );
+        tcx.debug_assert_args_compatible(def.did(), args);
         Ty::new(tcx, Adt(def, args))
     }
 
@@ -1715,11 +1715,7 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         closure_args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        debug_assert_eq!(
-            closure_args.len(),
-            tcx.generics_of(tcx.typeck_root_def_id(def_id)).count() + 3,
-            "closure constructed with incorrect generic parameters"
-        );
+        tcx.debug_assert_args_compatible(def_id, closure_args);
         Ty::new(tcx, Closure(def_id, closure_args))
     }
 
@@ -1729,11 +1725,7 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         closure_args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        debug_assert_eq!(
-            closure_args.len(),
-            tcx.generics_of(tcx.typeck_root_def_id(def_id)).count() + 5,
-            "closure constructed with incorrect generic parameters"
-        );
+        tcx.debug_assert_args_compatible(def_id, closure_args);
         Ty::new(tcx, CoroutineClosure(def_id, closure_args))
     }
 
@@ -1743,11 +1735,7 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         coroutine_args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        debug_assert_eq!(
-            coroutine_args.len(),
-            tcx.generics_of(tcx.typeck_root_def_id(def_id)).count() + 6,
-            "coroutine constructed with incorrect number of generic parameters"
-        );
+        tcx.debug_assert_args_compatible(def_id, coroutine_args);
         Ty::new(tcx, Coroutine(def_id, coroutine_args))
     }
 
@@ -1761,11 +1749,6 @@ impl<'tcx> Ty<'tcx> {
     }
 
     // misc
-
-    #[inline]
-    pub fn new_unit(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        tcx.types.unit
-    }
 
     #[inline]
     pub fn new_static_str(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
@@ -2244,7 +2227,7 @@ impl<'tcx> Ty<'tcx> {
     pub fn tuple_fields(self) -> &'tcx List<Ty<'tcx>> {
         match self.kind() {
             Tuple(args) => args,
-            _ => bug!("tuple_fields called on non-tuple"),
+            _ => bug!("tuple_fields called on non-tuple: {self:?}"),
         }
     }
 
@@ -2296,6 +2279,8 @@ impl<'tcx> Ty<'tcx> {
                 Ty::new_projection(tcx, assoc_items[0], tcx.mk_args(&[self.into()]))
             }
 
+            ty::Pat(ty, _) => ty.discriminant_ty(tcx),
+
             ty::Bool
             | ty::Char
             | ty::Int(_)
@@ -2325,6 +2310,133 @@ impl<'tcx> Ty<'tcx> {
                 bug!("`discriminant_ty` applied to unexpected type: {:?}", self)
             }
         }
+    }
+
+    /// Returns the type of the async destructor of this type.
+    pub fn async_destructor_ty(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> Ty<'tcx> {
+        if self.is_async_destructor_noop(tcx, param_env) || matches!(self.kind(), ty::Error(_)) {
+            return Ty::async_destructor_combinator(tcx, LangItem::AsyncDropNoop)
+                .instantiate_identity();
+        }
+        match *self.kind() {
+            ty::Param(_) | ty::Alias(..) | ty::Infer(ty::TyVar(_)) => {
+                let assoc_items = tcx
+                    .associated_item_def_ids(tcx.require_lang_item(LangItem::AsyncDestruct, None));
+                Ty::new_projection(tcx, assoc_items[0], [self])
+            }
+
+            ty::Array(elem_ty, _) | ty::Slice(elem_ty) => {
+                let dtor = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropSlice)
+                    .instantiate(tcx, &[elem_ty.into()]);
+                Ty::async_destructor_combinator(tcx, LangItem::AsyncDropFuse)
+                    .instantiate(tcx, &[dtor.into()])
+            }
+
+            ty::Adt(adt_def, args) if adt_def.is_enum() || adt_def.is_struct() => self
+                .adt_async_destructor_ty(
+                    tcx,
+                    adt_def.variants().iter().map(|v| v.fields.iter().map(|f| f.ty(tcx, args))),
+                    param_env,
+                ),
+            ty::Tuple(tys) => self.adt_async_destructor_ty(tcx, iter::once(tys), param_env),
+            ty::Closure(_, args) => self.adt_async_destructor_ty(
+                tcx,
+                iter::once(args.as_closure().upvar_tys()),
+                param_env,
+            ),
+            ty::CoroutineClosure(_, args) => self.adt_async_destructor_ty(
+                tcx,
+                iter::once(args.as_coroutine_closure().upvar_tys()),
+                param_env,
+            ),
+
+            ty::Adt(adt_def, _) => {
+                assert!(adt_def.is_union());
+
+                let surface_drop = self.surface_async_dropper_ty(tcx, param_env).unwrap();
+
+                Ty::async_destructor_combinator(tcx, LangItem::AsyncDropFuse)
+                    .instantiate(tcx, &[surface_drop.into()])
+            }
+
+            ty::Bound(..)
+            | ty::Foreign(_)
+            | ty::Placeholder(_)
+            | ty::Infer(ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => {
+                bug!("`async_destructor_ty` applied to unexpected type: {self:?}")
+            }
+
+            _ => bug!("`async_destructor_ty` is not yet implemented for type: {self:?}"),
+        }
+    }
+
+    fn adt_async_destructor_ty<I>(
+        self,
+        tcx: TyCtxt<'tcx>,
+        variants: I,
+        param_env: ParamEnv<'tcx>,
+    ) -> Ty<'tcx>
+    where
+        I: Iterator + ExactSizeIterator,
+        I::Item: IntoIterator<Item = Ty<'tcx>>,
+    {
+        debug_assert!(!self.is_async_destructor_noop(tcx, param_env));
+
+        let defer = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropDefer);
+        let chain = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropChain);
+
+        let noop =
+            Ty::async_destructor_combinator(tcx, LangItem::AsyncDropNoop).instantiate_identity();
+        let either = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropEither);
+
+        let variants_dtor = variants
+            .into_iter()
+            .map(|variant| {
+                variant
+                    .into_iter()
+                    .map(|ty| defer.instantiate(tcx, &[ty.into()]))
+                    .reduce(|acc, next| chain.instantiate(tcx, &[acc.into(), next.into()]))
+                    .unwrap_or(noop)
+            })
+            .reduce(|other, matched| {
+                either.instantiate(tcx, &[other.into(), matched.into(), self.into()])
+            })
+            .unwrap();
+
+        let dtor = if let Some(dropper_ty) = self.surface_async_dropper_ty(tcx, param_env) {
+            Ty::async_destructor_combinator(tcx, LangItem::AsyncDropChain)
+                .instantiate(tcx, &[dropper_ty.into(), variants_dtor.into()])
+        } else {
+            variants_dtor
+        };
+
+        Ty::async_destructor_combinator(tcx, LangItem::AsyncDropFuse)
+            .instantiate(tcx, &[dtor.into()])
+    }
+
+    fn surface_async_dropper_ty(
+        self,
+        tcx: TyCtxt<'tcx>,
+        param_env: ParamEnv<'tcx>,
+    ) -> Option<Ty<'tcx>> {
+        if self.has_surface_async_drop(tcx, param_env) {
+            Some(LangItem::SurfaceAsyncDropInPlace)
+        } else if self.has_surface_drop(tcx, param_env) {
+            Some(LangItem::AsyncDropSurfaceDropInPlace)
+        } else {
+            None
+        }
+        .map(|dropper| {
+            Ty::async_destructor_combinator(tcx, dropper).instantiate(tcx, &[self.into()])
+        })
+    }
+
+    fn async_destructor_combinator(
+        tcx: TyCtxt<'tcx>,
+        lang_item: LangItem,
+    ) -> ty::EarlyBinder<Ty<'tcx>> {
+        tcx.fn_sig(tcx.require_lang_item(lang_item, None))
+            .map_bound(|fn_sig| fn_sig.output().no_bound_vars().unwrap())
     }
 
     /// Returns the type of metadata for (potentially fat) pointers to this type,
@@ -2377,6 +2489,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Param(_) | ty::Alias(..) => Err(tail),
 
             ty::Infer(ty::TyVar(_))
+            | ty::Pat(..)
             | ty::Bound(..)
             | ty::Placeholder(..)
             | ty::Infer(ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => bug!(
@@ -2513,6 +2626,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Coroutine(..)
             | ty::CoroutineWitness(..)
             | ty::Array(..)
+            | ty::Pat(..)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
             | ty::Never
@@ -2566,6 +2680,8 @@ impl<'tcx> Ty<'tcx> {
             ty::Tuple(field_tys) => {
                 field_tys.len() <= 3 && field_tys.iter().all(Self::is_trivially_pure_clone_copy)
             }
+
+            ty::Pat(ty, _) => ty.is_trivially_pure_clone_copy(),
 
             // Sometimes traits aren't implemented for every ABI or arity,
             // because we can't be generic over everything yet.
@@ -2648,6 +2764,7 @@ impl<'tcx> Ty<'tcx> {
             | Foreign(_)
             | Str
             | Array(_, _)
+            | Pat(_, _)
             | Slice(_)
             | RawPtr(_, _)
             | Ref(_, _, _)
@@ -2703,7 +2820,7 @@ impl<'tcx> VarianceDiagInfo<'tcx> {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

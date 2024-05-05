@@ -319,7 +319,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
             ast::ForeignItemKind::MacCall(..) => {}
         }
 
-        visit::walk_foreign_item(self, i)
+        visit::walk_item(self, i)
     }
 
     fn visit_ty(&mut self, ty: &'a ast::Ty) {
@@ -331,6 +331,9 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
             }
             ast::TyKind::Never => {
                 gate!(&self, never_type, ty.span, "the `!` type is experimental");
+            }
+            ast::TyKind::Pat(..) => {
+                gate!(&self, pattern_types, ty.span, "pattern types are unstable");
             }
             _ => {}
         }
@@ -553,7 +556,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
         half_open_range_patterns_in_slices,
         "half-open range patterns in slices are unstable"
     );
-    gate_all!(inline_const, "inline-const is experimental");
     gate_all!(inline_const_pat, "inline-const in pattern position is experimental");
     gate_all!(associated_const_equality, "associated const equality is incomplete");
     gate_all!(yeet_expr, "`do yeet` expression is experimental");
@@ -566,6 +568,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     gate_all!(fn_delegation, "functions delegation is not yet fully implemented");
     gate_all!(postfix_match, "postfix match is experimental");
     gate_all!(mut_ref, "mutable by-reference bindings are experimental");
+    gate_all!(precise_capturing, "precise captures on `impl Trait` are experimental");
 
     if !visitor.features.never_patterns {
         if let Some(spans) = spans.get(&sym::never_patterns) {

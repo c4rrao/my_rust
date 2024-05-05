@@ -6,9 +6,6 @@
 #![feature(try_blocks)]
 #![feature(let_chains)]
 
-#[macro_use]
-extern crate tracing;
-
 mod errors;
 
 use rustc_ast::visit::{try_visit, VisitorResult};
@@ -31,6 +28,7 @@ use rustc_session::lint;
 use rustc_span::hygiene::Transparency;
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::Span;
+use tracing::debug;
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -276,6 +274,7 @@ where
             | ty::Tuple(..)
             | ty::RawPtr(..)
             | ty::Ref(..)
+            | ty::Pat(..)
             | ty::FnPtr(..)
             | ty::Param(..)
             | ty::Bound(..)

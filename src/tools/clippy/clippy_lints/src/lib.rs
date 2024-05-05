@@ -16,11 +16,14 @@
     rustc::diagnostic_outside_of_impl,
     rustc::untranslatable_diagnostic
 )]
-#![warn(trivial_casts, trivial_numeric_casts)]
-// warn on lints, that are included in `rust-lang/rust`s bootstrap
-#![warn(rust_2018_idioms, unused_lifetimes)]
-// warn on rustc internal lints
-#![warn(rustc::internal)]
+#![warn(
+    trivial_casts,
+    trivial_numeric_casts,
+    rust_2018_idioms,
+    unused_lifetimes,
+    unused_qualifications,
+    rustc::internal
+)]
 // Disable this rustc lint for now, as it was also done in rustc
 #![allow(rustc::potential_query_instability)]
 
@@ -186,6 +189,7 @@ mod large_futures;
 mod large_include_file;
 mod large_stack_arrays;
 mod large_stack_frames;
+mod legacy_numeric_constants;
 mod len_zero;
 mod let_if_seq;
 mod let_underscore;
@@ -531,6 +535,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
         allow_print_in_tests,
         allow_private_module_inception,
         allow_unwrap_in_tests,
+        allow_useless_vec_in_tests,
         ref allowed_dotfiles,
         ref allowed_idents_below_min_chars,
         ref allowed_scripts,
@@ -590,6 +595,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
         pub_underscore_fields_behavior,
         ref allowed_duplicate_crates,
         allow_comparison_to_zero,
+        ref allowed_prefixes,
 
         blacklisted_names: _,
         cyclomatic_complexity_threshold: _,
@@ -749,6 +755,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
             too_large_for_stack,
             msrv: msrv(),
             span_to_lint_map: BTreeMap::new(),
+            allow_in_test: allow_useless_vec_in_tests,
         })
     });
     store.register_late_pass(|_| Box::new(panic_unimplemented::PanicUnimplemented));
@@ -860,6 +867,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
             struct_field_name_threshold,
             avoid_breaking_exported_api,
             allow_private_module_inception,
+            allowed_prefixes,
         ))
     });
     store.register_early_pass(|| Box::new(tabs_in_doc_comments::TabsInDocComments));
@@ -1080,6 +1088,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
             allow_one_hash_in_raw_strings,
         })
     });
+    store.register_late_pass(move |_| Box::new(legacy_numeric_constants::LegacyNumericConstants::new(msrv())));
     store.register_late_pass(|_| Box::new(manual_range_patterns::ManualRangePatterns));
     store.register_early_pass(|| Box::new(visibility::Visibility));
     store.register_late_pass(move |_| Box::new(tuple_array_conversions::TupleArrayConversions { msrv: msrv() }));

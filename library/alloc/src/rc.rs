@@ -884,7 +884,10 @@ impl<T, A: Allocator> Rc<T, A> {
     #[cfg(not(no_global_oom_handling))]
     #[unstable(feature = "allocator_api", issue = "32838")]
     #[inline]
-    pub fn pin_in(value: T, alloc: A) -> Pin<Self> {
+    pub fn pin_in(value: T, alloc: A) -> Pin<Self>
+    where
+        A: 'static,
+    {
         unsafe { Pin::new_unchecked(Rc::new_in(value, alloc)) }
     }
 
@@ -3026,13 +3029,10 @@ impl<T: ?Sized, A: Allocator> Weak<T, A> {
     /// [`as_ptr`]: Weak::as_ptr
     #[inline]
     #[unstable(feature = "allocator_api", issue = "32838")]
-    pub fn into_raw_and_alloc(self) -> (*const T, A)
-    where
-        A: Clone,
-    {
-        let result = self.as_ptr();
-        let alloc = self.alloc.clone();
-        mem::forget(self);
+    pub fn into_raw_and_alloc(self) -> (*const T, A) {
+        let rc = mem::ManuallyDrop::new(self);
+        let result = rc.as_ptr();
+        let alloc = unsafe { ptr::read(&rc.alloc) };
         (result, alloc)
     }
 

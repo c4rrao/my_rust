@@ -16,7 +16,7 @@ use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::canonical::QueryRegionConstraints;
 use rustc_infer::infer::outlives::env::RegionBoundPairs;
 use rustc_infer::infer::region_constraints::RegionConstraintData;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::infer::{
     BoundRegion, BoundRegionConversionTime, InferCtxt, NllRegionVariableOrigin,
 };
@@ -33,6 +33,7 @@ use rustc_middle::ty::{
     OpaqueHiddenType, OpaqueTypeKey, RegionVid, Ty, TyCtxt, UserType, UserTypeAnnotationIndex,
 };
 use rustc_middle::ty::{GenericArgsRef, UserArgs};
+use rustc_middle::{bug, span_bug};
 use rustc_mir_dataflow::points::DenseLocationMap;
 use rustc_span::def_id::CRATE_DEF_ID;
 use rustc_span::source_map::Spanned;
@@ -1921,7 +1922,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 }
             }
             AggregateKind::Array(ty) => Ok(ty),
-            AggregateKind::Tuple => {
+            AggregateKind::Tuple | AggregateKind::RawPtr(..) => {
                 unreachable!("This should have been covered in check_rvalues");
             }
         }
@@ -2425,7 +2426,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     ty::RawPtr(_, _) | ty::FnPtr(_) => {
                         let ty_right = right.ty(body, tcx);
                         let common_ty = self.infcx.next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::MiscVariable,
+                            param_def_id: None,
                             span: body.source_info(location).span,
                         });
                         self.sub_types(
@@ -2518,6 +2519,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 AggregateKind::Closure(_, _) => None,
                 AggregateKind::Coroutine(_, _) => None,
                 AggregateKind::CoroutineClosure(_, _) => None,
+                AggregateKind::RawPtr(_, _) => None,
             },
         }
     }
@@ -2537,6 +2539,10 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         if *aggregate_kind == AggregateKind::Tuple {
             // tuple rvalue field type is always the type of the op. Nothing to check here.
             return;
+        }
+
+        if let AggregateKind::RawPtr(..) = aggregate_kind {
+            bug!("RawPtr should only be in runtime MIR");
         }
 
         for (i, operand) in operands.iter_enumerated() {
@@ -2757,7 +2763,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 ),
             ),
 
-            AggregateKind::Array(_) | AggregateKind::Tuple => {
+            AggregateKind::Array(_) | AggregateKind::Tuple | AggregateKind::RawPtr(..) => {
                 (CRATE_DEF_ID.to_def_id(), ty::InstantiatedPredicates::empty())
             }
         };
