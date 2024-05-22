@@ -1,9 +1,3 @@
-/*!
-
-Rust MIR: a lowered representation of Rust.
-
-*/
-
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![feature(rustdoc_internals)]
@@ -22,8 +16,6 @@ Rust MIR: a lowered representation of Rust.
 
 #[macro_use]
 extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
 
 pub mod const_eval;
 mod errors;

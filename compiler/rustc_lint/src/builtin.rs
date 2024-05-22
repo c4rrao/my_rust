@@ -30,16 +30,17 @@ use crate::{
         BuiltinExplicitOutlivesSuggestion, BuiltinFeatureIssueNote, BuiltinIncompleteFeatures,
         BuiltinIncompleteFeaturesHelp, BuiltinInternalFeatures, BuiltinKeywordIdents,
         BuiltinMissingCopyImpl, BuiltinMissingDebugImpl, BuiltinMissingDoc,
-        BuiltinMutablesTransmutes, BuiltinNoMangleGeneric, BuiltinNonShorthandFieldPatterns,
-        BuiltinSpecialModuleNameUsed, BuiltinTrivialBounds, BuiltinTypeAliasGenericBounds,
-        BuiltinTypeAliasGenericBoundsSuggestion, BuiltinTypeAliasWhereClause,
-        BuiltinUngatedAsyncFnTrackCaller, BuiltinUnpermittedTypeInit,
+        BuiltinMutablesTransmutes, BuiltinNamedAsmLabel, BuiltinNoMangleGeneric,
+        BuiltinNonShorthandFieldPatterns, BuiltinSpecialModuleNameUsed, BuiltinTrivialBounds,
+        BuiltinTypeAliasGenericBounds, BuiltinTypeAliasGenericBoundsSuggestion,
+        BuiltinTypeAliasWhereClause, BuiltinUngatedAsyncFnTrackCaller, BuiltinUnpermittedTypeInit,
         BuiltinUnpermittedTypeInitSub, BuiltinUnreachablePub, BuiltinUnsafe,
         BuiltinUnstableFeatures, BuiltinUnusedDocComment, BuiltinUnusedDocCommentSub,
         BuiltinWhileTrue, SuggestChangingAssocTypes,
     },
     EarlyContext, EarlyLintPass, LateContext, LateLintPass, Level, LintContext,
 };
+use ast::token::TokenKind;
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
 use rustc_ast::visit::{FnCtxt, FnKind};
 use rustc_ast::{self as ast, *};
@@ -56,10 +57,10 @@ use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::GenericArgKind;
-use rustc_middle::ty::ToPredicate;
 use rustc_middle::ty::TypeVisitableExt;
+use rustc_middle::ty::Upcast;
 use rustc_middle::ty::{self, Ty, TyCtxt, VariantDef};
-use rustc_session::lint::{BuiltinLintDiag, FutureIncompatibilityReason};
+use rustc_session::lint::FutureIncompatibilityReason;
 use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
 use rustc_span::edition::Edition;
 use rustc_span::source_map::Spanned;
@@ -359,11 +360,11 @@ impl EarlyLintPass for UnsafeCode {
 
     fn check_item(&mut self, cx: &EarlyContext<'_>, it: &ast::Item) {
         match it.kind {
-            ast::ItemKind::Trait(box ast::Trait { unsafety: ast::Unsafe::Yes(_), .. }) => {
+            ast::ItemKind::Trait(box ast::Trait { safety: ast::Safety::Unsafe(_), .. }) => {
                 self.report_unsafe(cx, it.span, BuiltinUnsafe::UnsafeTrait);
             }
 
-            ast::ItemKind::Impl(box ast::Impl { unsafety: ast::Unsafe::Yes(_), .. }) => {
+            ast::ItemKind::Impl(box ast::Impl { safety: ast::Safety::Unsafe(_), .. }) => {
                 self.report_unsafe(cx, it.span, BuiltinUnsafe::UnsafeImpl);
             }
 
@@ -418,7 +419,7 @@ impl EarlyLintPass for UnsafeCode {
         if let FnKind::Fn(
             ctxt,
             _,
-            ast::FnSig { header: ast::FnHeader { unsafety: ast::Unsafe::Yes(_), .. }, .. },
+            ast::FnSig { header: ast::FnHeader { safety: ast::Safety::Unsafe(_), .. }, .. },
             _,
             _,
             body,
@@ -733,7 +734,7 @@ fn type_implements_negative_copy_modulo_regions<'tcx>(
         cause: traits::ObligationCause::dummy(),
         param_env,
         recursion_depth: 0,
-        predicate: ty::Binder::dummy(pred).to_predicate(tcx),
+        predicate: pred.upcast(tcx),
     };
 
     tcx.infer_ctxt().build().predicate_must_hold_modulo_regions(&obligation)
@@ -1869,16 +1870,24 @@ struct UnderMacro(bool);
 
 impl KeywordIdents {
     fn check_tokens(&mut self, cx: &EarlyContext<'_>, tokens: &TokenStream) {
+        // Check if the preceding token is `$`, because we want to allow `$async`, etc.
+        let mut prev_dollar = false;
         for tt in tokens.trees() {
             match tt {
                 // Only report non-raw idents.
                 TokenTree::Token(token, _) => {
                     if let Some((ident, token::IdentIsRaw::No)) = token.ident() {
-                        self.check_ident_token(cx, UnderMacro(true), ident);
+                        if !prev_dollar {
+                            self.check_ident_token(cx, UnderMacro(true), ident);
+                        }
+                    } else if token.kind == TokenKind::Dollar {
+                        prev_dollar = true;
+                        continue;
                     }
                 }
                 TokenTree::Delimited(.., tts) => self.check_tokens(cx, tts),
             }
+            prev_dollar = false;
         }
     }
 
@@ -2873,16 +2882,7 @@ impl<'tcx> LateLintPass<'tcx> for NamedAsmLabels {
                     let target_spans: MultiSpan =
                         if spans.len() > 0 { spans.into() } else { (*template_span).into() };
 
-                    cx.span_lint_with_diagnostics(
-                            NAMED_ASM_LABELS,
-                            Some(target_spans),
-                            fluent::lint_builtin_asm_labels,
-                            |_| {},
-                            BuiltinLintDiag::NamedAsmLabel(
-                                "only local labels of the form `<number>:` should be used in inline asm"
-                                    .to_string(),
-                            ),
-                        );
+                    cx.emit_span_lint(NAMED_ASM_LABELS, target_spans, BuiltinNamedAsmLabel);
                 }
             }
         }

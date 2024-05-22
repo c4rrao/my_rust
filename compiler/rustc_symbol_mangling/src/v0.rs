@@ -319,11 +319,10 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
             ty::Uint(UintTy::U64) => "y",
             ty::Uint(UintTy::U128) => "o",
             ty::Uint(UintTy::Usize) => "j",
-            // FIXME(f16_f128): update these once `rustc-demangle` supports the new types
-            ty::Float(FloatTy::F16) => unimplemented!("f16_f128"),
+            ty::Float(FloatTy::F16) => "C3f16",
             ty::Float(FloatTy::F32) => "f",
             ty::Float(FloatTy::F64) => "d",
-            ty::Float(FloatTy::F128) => unimplemented!("f16_f128"),
+            ty::Float(FloatTy::F128) => "C4f128",
             ty::Never => "z",
 
             // Placeholders (should be demangled as `_`).
@@ -425,7 +424,7 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
             ty::FnPtr(sig) => {
                 self.push("F");
                 self.in_binder(&sig, |cx, sig| {
-                    if sig.unsafety == hir::Unsafety::Unsafe {
+                    if sig.safety == hir::Safety::Unsafe {
                         cx.push("U");
                     }
                     match sig.abi {
@@ -630,8 +629,7 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
                         let pointee_ty = ct
                             .ty()
                             .builtin_deref(true)
-                            .expect("tried to dereference on non-ptr type")
-                            .ty;
+                            .expect("tried to dereference on non-ptr type");
                         // FIXME(const_generics): add an assert that we only do this for valtrees.
                         let dereferenced_const = self.tcx.mk_ct_from_kind(ct.kind(), pointee_ty);
                         dereferenced_const.print(self)?;

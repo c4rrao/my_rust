@@ -1,6 +1,3 @@
-run-make/alloc-no-oom-handling/Makefile
-run-make/alloc-no-rc/Makefile
-run-make/alloc-no-sync/Makefile
 run-make/allocator-shim-circular-deps/Makefile
 run-make/allow-non-lint-warnings-cmdline/Makefile
 run-make/allow-warnings-cmdline-stability/Makefile
@@ -11,8 +8,6 @@ run-make/branch-protection-check-IBT/Makefile
 run-make/c-dynamic-dylib/Makefile
 run-make/c-dynamic-rlib/Makefile
 run-make/c-link-to-rust-dylib/Makefile
-run-make/c-link-to-rust-staticlib/Makefile
-run-make/c-link-to-rust-va-list-fn/Makefile
 run-make/c-static-dylib/Makefile
 run-make/c-static-rlib/Makefile
 run-make/c-unwind-abi-catch-lib-panic/Makefile
@@ -44,7 +39,6 @@ run-make/dep-graph/Makefile
 run-make/dep-info-doesnt-run-much/Makefile
 run-make/dep-info-spaces/Makefile
 run-make/dep-info/Makefile
-run-make/doctests-runtool/Makefile
 run-make/dump-ice-to-disk/Makefile
 run-make/dump-mono-stats/Makefile
 run-make/duplicate-output-flavors/Makefile
@@ -99,8 +93,6 @@ run-make/invalid-staticlib/Makefile
 run-make/issue-107094/Makefile
 run-make/issue-10971-temps-dir/Makefile
 run-make/issue-109934-lto-debuginfo/Makefile
-run-make/issue-11908/Makefile
-run-make/issue-14500/Makefile
 run-make/issue-14698/Makefile
 run-make/issue-15460/Makefile
 run-make/issue-18943/Makefile
@@ -111,7 +103,6 @@ run-make/issue-25581/Makefile
 run-make/issue-26006/Makefile
 run-make/issue-26092/Makefile
 run-make/issue-28595/Makefile
-run-make/issue-28766/Makefile
 run-make/issue-30063/Makefile
 run-make/issue-33329/Makefile
 run-make/issue-35164/Makefile
@@ -136,7 +127,6 @@ run-make/issue-85401-static-mir/Makefile
 run-make/issue-85441/Makefile
 run-make/issue-88756-default-output/Makefile
 run-make/issue-97463-abi-param-passing/Makefile
-run-make/issue64319/Makefile
 run-make/jobserver-error/Makefile
 run-make/libs-through-symlinks/Makefile
 run-make/libtest-json/Makefile
@@ -186,9 +176,7 @@ run-make/native-link-modifier-whole-archive/Makefile
 run-make/no-alloc-shim/Makefile
 run-make/no-builtins-attribute/Makefile
 run-make/no-builtins-lto/Makefile
-run-make/no-cdylib-as-rdylib/Makefile
 run-make/no-duplicate-libs/Makefile
-run-make/no-intermediate-extras/Makefile
 run-make/obey-crate-type-flag/Makefile
 run-make/optimization-remarks-dir-pgo/Makefile
 run-make/optimization-remarks-dir/Makefile
@@ -199,7 +187,6 @@ run-make/output-with-hyphens/Makefile
 run-make/override-aliased-flags/Makefile
 run-make/overwrite-input/Makefile
 run-make/panic-abort-eh_frame/Makefile
-run-make/panic-impl-transitive/Makefile
 run-make/pass-linker-flags-flavor/Makefile
 run-make/pass-linker-flags-from-dep/Makefile
 run-make/pass-linker-flags/Makefile
@@ -245,22 +232,9 @@ run-make/rlib-format-packed-bundled-libs-3/Makefile
 run-make/rlib-format-packed-bundled-libs/Makefile
 run-make/rmeta-preferred/Makefile
 run-make/rustc-macro-dep-files/Makefile
-run-make/rustdoc-error-lines/Makefile
 run-make/rustdoc-io-error/Makefile
-run-make/rustdoc-map-file/Makefile
-run-make/rustdoc-output-path/Makefile
-run-make/rustdoc-scrape-examples-invalid-expr/Makefile
 run-make/rustdoc-scrape-examples-macros/Makefile
-run-make/rustdoc-scrape-examples-multiple/Makefile
-run-make/rustdoc-scrape-examples-ordering/Makefile
-run-make/rustdoc-scrape-examples-remap/Makefile
-run-make/rustdoc-scrape-examples-test/Makefile
-run-make/rustdoc-scrape-examples-whitespace/Makefile
-run-make/rustdoc-shared-flags/Makefile
-run-make/rustdoc-target-spec-json-path/Makefile
-run-make/rustdoc-themes/Makefile
 run-make/rustdoc-verify-output-files/Makefile
-run-make/rustdoc-with-out-dir-option/Makefile
 run-make/rustdoc-with-output-option/Makefile
 run-make/rustdoc-with-short-out-dir-option/Makefile
 run-make/sanitizer-cdylib-link/Makefile
@@ -282,7 +256,6 @@ run-make/stable-symbol-names/Makefile
 run-make/static-dylib-by-default/Makefile
 run-make/static-extern-type/Makefile
 run-make/static-pie/Makefile
-run-make/static-unwinding/Makefile
 run-make/staticlib-blank-lib/Makefile
 run-make/staticlib-dylib-linkage/Makefile
 run-make/std-core-cycle/Makefile

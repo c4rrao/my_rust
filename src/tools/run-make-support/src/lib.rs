@@ -40,18 +40,38 @@ pub fn target() -> String {
 
 /// Check if target is windows-like.
 pub fn is_windows() -> bool {
-    env::var_os("IS_WINDOWS").is_some()
+    target().contains("windows")
 }
 
 /// Check if target uses msvc.
 pub fn is_msvc() -> bool {
-    env::var_os("IS_MSVC").is_some()
+    target().contains("msvc")
+}
+
+/// Check if target uses macOS.
+pub fn is_darwin() -> bool {
+    target().contains("darwin")
 }
 
 /// Construct a path to a static library under `$TMPDIR` given the library name. This will return a
 /// path with `$TMPDIR` joined with platform-and-compiler-specific library name.
 pub fn static_lib(name: &str) -> PathBuf {
     tmp_dir().join(static_lib_name(name))
+}
+
+pub fn python_command() -> Command {
+    let python_path = std::env::var("PYTHON").expect("PYTHON environment variable does not exist");
+    Command::new(python_path)
+}
+
+pub fn htmldocck() -> Command {
+    let mut python = python_command();
+    python.arg(source_path().join("src/etc/htmldocck.py"));
+    python
+}
+
+pub fn source_path() -> PathBuf {
+    std::env::var("S").expect("S variable does not exist").into()
 }
 
 /// Construct the static library name based on the platform.
@@ -73,9 +93,47 @@ pub fn static_lib_name(name: &str) -> String {
     //     endif
     // endif
     // ```
-    assert!(!name.contains(char::is_whitespace), "name cannot contain whitespace");
+    assert!(!name.contains(char::is_whitespace), "static library name cannot contain whitespace");
 
-    if target().contains("msvc") { format!("{name}.lib") } else { format!("lib{name}.a") }
+    if is_msvc() { format!("{name}.lib") } else { format!("lib{name}.a") }
+}
+
+/// Construct a path to a dynamic library under `$TMPDIR` given the library name. This will return a
+/// path with `$TMPDIR` joined with platform-and-compiler-specific library name.
+pub fn dynamic_lib(name: &str) -> PathBuf {
+    tmp_dir().join(dynamic_lib_name(name))
+}
+
+/// Construct the dynamic library name based on the platform.
+pub fn dynamic_lib_name(name: &str) -> String {
+    // See tools.mk (irrelevant lines omitted):
+    //
+    // ```makefile
+    // ifeq ($(UNAME),Darwin)
+    //     DYLIB = $(TMPDIR)/lib$(1).dylib
+    // else
+    //     ifdef IS_WINDOWS
+    //         DYLIB = $(TMPDIR)/$(1).dll
+    //     else
+    //         DYLIB = $(TMPDIR)/lib$(1).so
+    //     endif
+    // endif
+    // ```
+    assert!(!name.contains(char::is_whitespace), "dynamic library name cannot contain whitespace");
+
+    if is_darwin() {
+        format!("lib{name}.dylib")
+    } else if is_windows() {
+        format!("{name}.dll")
+    } else {
+        format!("lib{name}.so")
+    }
+}
+
+/// Construct a path to a rust library (rlib) under `$TMPDIR` given the library name. This will return a
+/// path with `$TMPDIR` joined with the library name.
+pub fn rust_lib(name: &str) -> PathBuf {
+    tmp_dir().join(format!("lib{name}.rlib"))
 }
 
 /// Construct the binary name based on platform.
@@ -164,7 +222,7 @@ pub fn set_host_rpath(cmd: &mut Command) {
 ///
 /// impl CommandWrapper {
 ///     /// Get the [`Output`][::std::process::Output] of the finished process.
-///     pub fn output(&mut self) -> Output { /* ... */ } // <- required `output()` method
+///     pub fn command_output(&mut self) -> Output { /* ... */ } // <- required `command_output()` method
 /// }
 ///
 /// crate::impl_common_helpers!(CommandWrapper);
@@ -242,7 +300,7 @@ macro_rules! impl_common_helpers {
                 let caller_location = ::std::panic::Location::caller();
                 let caller_line_number = caller_location.line();
 
-                let output = self.output();
+                let output = self.command_output();
                 if !output.status.success() {
                     handle_failed_output(&self.cmd, output, caller_line_number);
                 }
@@ -255,7 +313,7 @@ macro_rules! impl_common_helpers {
                 let caller_location = ::std::panic::Location::caller();
                 let caller_line_number = caller_location.line();
 
-                let output = self.output();
+                let output = self.command_output();
                 if output.status.success() {
                     handle_failed_output(&self.cmd, output, caller_line_number);
                 }

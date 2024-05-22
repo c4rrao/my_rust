@@ -8,14 +8,14 @@ use self::SelectionCandidate::*;
 use super::coherence::{self, Conflict};
 use super::const_evaluatable;
 use super::project;
-use super::project::ProjectionTyObligation;
+use super::project::ProjectionTermObligation;
 use super::util;
 use super::util::closure_trait_ref_and_return_type;
 use super::wf;
 use super::{
-    ImplDerivedObligation, ImplDerivedObligationCause, Normalized, Obligation, ObligationCause,
-    ObligationCauseCode, Overflow, PolyTraitObligation, PredicateObligation, Selection,
-    SelectionError, SelectionResult, TraitQueryMode,
+    ImplDerivedCause, Normalized, Obligation, ObligationCause, ObligationCauseCode, Overflow,
+    PolyTraitObligation, PredicateObligation, Selection, SelectionError, SelectionResult,
+    TraitQueryMode,
 };
 
 use crate::infer::{InferCtxt, InferOk, TypeFreshener};
@@ -36,14 +36,16 @@ use rustc_infer::infer::BoundRegionConversionTime;
 use rustc_infer::infer::BoundRegionConversionTime::HigherRankedType;
 use rustc_infer::infer::DefineOpaqueTypes;
 use rustc_infer::traits::TraitObligation;
+use rustc_middle::bug;
 use rustc_middle::dep_graph::dep_kinds;
 use rustc_middle::dep_graph::DepNodeIndex;
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::ty::_match::MatchAgainstFreshVars;
 use rustc_middle::ty::abstract_const::NotConstEvaluatable;
+use rustc_middle::ty::print::PrintTraitRefExt as _;
 use rustc_middle::ty::relate::TypeRelation;
 use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, PolyProjectionPredicate, ToPredicate};
+use rustc_middle::ty::{self, PolyProjectionPredicate, Upcast};
 use rustc_middle::ty::{Ty, TyCtxt, TypeFoldable, TypeVisitableExt};
 use rustc_span::symbol::sym;
 use rustc_span::Symbol;
@@ -737,8 +739,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                             // stack would be `T: Auto`.
                             let cycle = stack.iter().take_while(|s| s.depth > stack_arg.1);
                             let tcx = self.tcx();
-                            let cycle =
-                                cycle.map(|stack| stack.obligation.predicate.to_predicate(tcx));
+                            let cycle = cycle.map(|stack| stack.obligation.predicate.upcast(tcx));
                             if self.coinductive_match(cycle) {
                                 stack.update_reached_depth(stack_arg.1);
                                 return Ok(EvaluatedToOk);
@@ -807,7 +808,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 ty::PredicateKind::Clause(ty::ClauseKind::Projection(data)) => {
                     let data = bound_predicate.rebind(data);
                     let project_obligation = obligation.with(self.tcx(), data);
-                    match project::poly_project_and_unify_type(self, &project_obligation) {
+                    match project::poly_project_and_unify_term(self, &project_obligation) {
                         ProjectAndUnifyResult::Holds(mut subobligations) => {
                             'compute_res: {
                                 // If we've previously marked this projection as 'complete', then
@@ -1172,7 +1173,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // if the regions match exactly.
             let cycle = stack.iter().skip(1).take_while(|s| s.depth >= cycle_depth);
             let tcx = self.tcx();
-            let cycle = cycle.map(|stack| stack.obligation.predicate.to_predicate(tcx));
+            let cycle = cycle.map(|stack| stack.obligation.predicate.upcast(tcx));
             if self.coinductive_match(cycle) {
                 debug!("evaluate_stack --> recursive, coinductive");
                 Some(EvaluatedToOk)
@@ -1377,7 +1378,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         error_obligation: &Obligation<'tcx, T>,
     ) -> Result<(), OverflowError>
     where
-        T: ToPredicate<'tcx> + Clone,
+        T: Upcast<TyCtxt<'tcx>, ty::Predicate<'tcx>> + Clone,
     {
         if !self.infcx.tcx.recursion_limit().value_within_limit(depth) {
             match self.query_mode {
@@ -1406,7 +1407,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         error_obligation: &Obligation<'tcx, V>,
     ) -> Result<(), OverflowError>
     where
-        V: ToPredicate<'tcx> + Clone,
+        V: Upcast<TyCtxt<'tcx>, ty::Predicate<'tcx>> + Clone,
     {
         self.check_recursion_depth(obligation.recursion_depth, error_obligation)
     }
@@ -1732,7 +1733,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     /// in cases like #91762.
     pub(super) fn match_projection_projections(
         &mut self,
-        obligation: &ProjectionTyObligation<'tcx>,
+        obligation: &ProjectionTermObligation<'tcx>,
         env_predicate: PolyProjectionPredicate<'tcx>,
         potentially_unnormalized_candidates: bool,
     ) -> ProjectionMatchesProjection {
@@ -1751,12 +1752,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     obligation.param_env,
                     obligation.cause.clone(),
                     obligation.recursion_depth + 1,
-                    infer_predicate.projection_ty,
+                    infer_predicate.projection_term,
                     &mut nested_obligations,
                 )
             })
         } else {
-            infer_predicate.projection_ty
+            infer_predicate.projection_term
         };
 
         let is_match = self
@@ -1777,9 +1778,19 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // If this type is a GAT, and of the GAT args resolve to something new,
             // that means that we must have newly inferred something about the GAT.
             // We should give up in that case.
-            if !generics.params.is_empty()
+            // FIXME(generic-associated-types): This only detects one layer of inference,
+            // which is probably not what we actually want, but fixing it causes some ambiguity:
+            // <https://github.com/rust-lang/rust/issues/125196>.
+            if !generics.is_own_empty()
                 && obligation.predicate.args[generics.parent_count..].iter().any(|&p| {
-                    p.has_non_region_infer() && self.infcx.resolve_vars_if_possible(p) != p
+                    p.has_non_region_infer()
+                        && match p.unpack() {
+                            ty::GenericArgKind::Const(ct) => {
+                                self.infcx.shallow_resolve_const(ct) != ct
+                            }
+                            ty::GenericArgKind::Type(ty) => self.infcx.shallow_resolve(ty) != ty,
+                            ty::GenericArgKind::Lifetime(_) => false,
+                        }
                 })
             {
                 ProjectionMatchesProjection::Ambiguous
@@ -2441,7 +2452,7 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                     });
 
                 let tcx = self.tcx();
-                let trait_ref = if tcx.generics_of(trait_def_id).params.len() == 1 {
+                let trait_ref = if tcx.generics_of(trait_def_id).own_params.len() == 1 {
                     ty::TraitRef::new(tcx, trait_def_id, [normalized_ty])
                 } else {
                     // If this is an ill-formed auto/built-in trait, then synthesize
@@ -2771,7 +2782,7 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                     cause.clone()
                 } else {
                     cause.clone().derived_cause(parent_trait_pred, |derived| {
-                        ImplDerivedObligation(Box::new(ImplDerivedObligationCause {
+                        ObligationCauseCode::ImplDerived(Box::new(ImplDerivedCause {
                             derived,
                             impl_or_alias_def_id: def_id,
                             impl_def_predicate_index: Some(index),

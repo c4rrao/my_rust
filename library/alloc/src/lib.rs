@@ -160,11 +160,13 @@
 #![feature(tuple_trait)]
 #![feature(unicode_internals)]
 #![feature(unsize)]
+#![feature(unwrap_infallible)]
 #![feature(vec_pop_if)]
 // tidy-alphabetical-end
 //
 // Language features:
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(exclusive_range_pattern))]
 #![cfg_attr(not(test), feature(coroutine_trait))]
 #![cfg_attr(test, feature(panic_update_hook))]
 #![cfg_attr(test, feature(test))]
@@ -179,7 +181,6 @@
 #![feature(const_try)]
 #![feature(decl_macro)]
 #![feature(dropck_eyepatch)]
-#![feature(exclusive_range_pattern)]
 #![feature(fundamental)]
 #![feature(hashmap_internals)]
 #![feature(lang_items)]

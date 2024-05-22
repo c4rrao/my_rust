@@ -2,10 +2,10 @@
 
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::query::{IntoQueryParam, Providers};
-use crate::ty::layout::IntegerExt;
+use crate::ty::layout::{FloatExt, IntegerExt};
 use crate::ty::{
-    self, FallibleTypeFolder, ToPredicate, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable,
-    TypeVisitableExt,
+    self, FallibleTypeFolder, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable,
+    TypeVisitableExt, Upcast,
 };
 use crate::ty::{GenericArgKind, GenericArgsRef};
 use rustc_apfloat::Float as _;
@@ -20,7 +20,7 @@ use rustc_index::bit_set::GrowableBitSet;
 use rustc_macros::{extension, HashStable, TyDecodable, TyEncodable};
 use rustc_session::Limit;
 use rustc_span::sym;
-use rustc_target::abi::{Integer, IntegerType, Primitive, Size};
+use rustc_target::abi::{Float, Integer, IntegerType, Size};
 use rustc_target::spec::abi::Abi;
 use smallvec::{smallvec, SmallVec};
 use std::{fmt, iter};
@@ -1086,7 +1086,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for OpaqueTypeExpander<'tcx> {
         {
             p.kind()
                 .rebind(ty::ProjectionPredicate {
-                    projection_ty: projection_pred.projection_ty.fold_with(self),
+                    projection_term: projection_pred.projection_term.fold_with(self),
                     // Don't fold the term on the RHS of the projection predicate.
                     // This is because for default trait methods with RPITITs, we
                     // install a `NormalizesTo(Projection(RPITIT) -> Opaque(RPITIT))`
@@ -1094,7 +1094,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for OpaqueTypeExpander<'tcx> {
                     // anything that requires `ParamEnv::with_reveal_all_normalized`.
                     term: projection_pred.term,
                 })
-                .to_predicate(self.tcx)
+                .upcast(self.tcx)
         } else {
             p.super_fold_with(self)
         }
@@ -1130,7 +1130,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for WeakAliasTypeExpander<'tcx> {
     }
 
     fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
-        if !ct.ty().has_type_flags(ty::TypeFlags::HAS_TY_WEAK) {
+        if !ct.has_type_flags(ty::TypeFlags::HAS_TY_WEAK) {
             return ct;
         }
         ct.super_fold_with(self)
@@ -1145,8 +1145,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Char => Size::from_bytes(4),
             ty::Int(ity) => Integer::from_int_ty(&tcx, ity).size(),
             ty::Uint(uty) => Integer::from_uint_ty(&tcx, uty).size(),
-            ty::Float(ty::FloatTy::F32) => Primitive::F32.size(&tcx),
-            ty::Float(ty::FloatTy::F64) => Primitive::F64.size(&tcx),
+            ty::Float(fty) => Float::from_float_ty(fty).size(),
             _ => bug!("non primitive type"),
         }
     }

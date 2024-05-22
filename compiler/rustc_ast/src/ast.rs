@@ -1422,7 +1422,7 @@ pub enum ExprKind {
     /// of `if` / `while` expressions. (e.g., `if let 0 = x { .. }`).
     ///
     /// `Span` represents the whole `let pat = expr` statement.
-    Let(P<Pat>, P<Expr>, Span, Option<ErrorGuaranteed>),
+    Let(P<Pat>, P<Expr>, Span, Recovered),
     /// An `if` block, with an optional `else` block.
     ///
     /// `if expr { block } else { expr }`
@@ -2105,7 +2105,7 @@ impl Ty {
 
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct BareFnTy {
-    pub unsafety: Unsafe,
+    pub safety: Safety,
     pub ext: Extern,
     pub generic_params: ThinVec<GenericParam>,
     pub decl: P<FnDecl>,
@@ -2164,7 +2164,7 @@ pub enum TyKind {
     MacCall(P<MacCall>),
     /// Placeholder for a `va_list`.
     CVarArgs,
-    /// Pattern types like `pattern_type!(u32 is 1..=)`, which is the same as `NonZeroU32`,
+    /// Pattern types like `pattern_type!(u32 is 1..=)`, which is the same as `NonZero<u32>`,
     /// just as part of the type system.
     Pat(P<Ty>, P<Pat>),
     /// Sometimes we need a dummy value when no error has occurred.
@@ -2484,11 +2484,15 @@ pub enum IsAuto {
     No,
 }
 
+/// Safety of items.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Encodable, Decodable, Debug)]
 #[derive(HashStable_Generic)]
-pub enum Unsafe {
-    Yes(Span),
-    No,
+pub enum Safety {
+    /// `unsafe` an item is explicitly marked as `unsafe`.
+    Unsafe(Span),
+    /// Default means no value was provided, it will take a default value given the context in
+    /// which is used.
+    Default,
 }
 
 /// Describes what kind of coroutine markers, if any, a function has.
@@ -2692,7 +2696,7 @@ pub struct ModSpans {
 pub struct ForeignMod {
     /// `unsafe` keyword accepted syntactically for macro DSLs, but not
     /// semantically by Rust.
-    pub unsafety: Unsafe,
+    pub safety: Safety,
     pub abi: Option<StrLit>,
     pub items: ThinVec<P<ForeignItem>>,
 }
@@ -2729,7 +2733,14 @@ pub enum UseTreeKind {
     /// `use prefix` or `use prefix as rename`
     Simple(Option<Ident>),
     /// `use prefix::{...}`
-    Nested(ThinVec<(UseTree, NodeId)>),
+    ///
+    /// The span represents the braces of the nested group and all elements within:
+    ///
+    /// ```text
+    /// use foo::{bar, baz};
+    ///          ^^^^^^^^^^
+    /// ```
+    Nested { items: ThinVec<(UseTree, NodeId)>, span: Span },
     /// `use prefix::*`
     Glob,
 }
@@ -2881,17 +2892,20 @@ pub struct FieldDef {
     pub is_placeholder: bool,
 }
 
+/// Was parsing recovery performed?
+#[derive(Copy, Clone, Debug, Encodable, Decodable, HashStable_Generic)]
+pub enum Recovered {
+    No,
+    Yes(ErrorGuaranteed),
+}
+
 /// Fields and constructor ids of enum variants and structs.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum VariantData {
     /// Struct variant.
     ///
     /// E.g., `Bar { .. }` as in `enum Foo { Bar { .. } }`.
-    Struct {
-        fields: ThinVec<FieldDef>,
-        // FIXME: investigate making this a `Option<ErrorGuaranteed>`
-        recovered: bool,
-    },
+    Struct { fields: ThinVec<FieldDef>, recovered: Recovered },
     /// Tuple variant.
     ///
     /// E.g., `Bar(..)` as in `enum Foo { Bar(..) }`.
@@ -2958,6 +2972,7 @@ impl Item {
             | ItemKind::GlobalAsm(_)
             | ItemKind::MacCall(_)
             | ItemKind::Delegation(_)
+            | ItemKind::DelegationMac(_)
             | ItemKind::MacroDef(_) => None,
             ItemKind::Static(_) => None,
             ItemKind::Const(i) => Some(&i.generics),
@@ -3007,8 +3022,8 @@ impl Extern {
 /// included in this struct (e.g., `async unsafe fn` or `const extern "C" fn`).
 #[derive(Clone, Copy, Encodable, Decodable, Debug)]
 pub struct FnHeader {
-    /// The `unsafe` keyword, if any
-    pub unsafety: Unsafe,
+    /// Whether this is `unsafe`, or has a default safety
+    pub safety: Safety,
     /// Whether this is `async`, `gen`, or nothing.
     pub coroutine_kind: Option<CoroutineKind>,
     /// The `const` keyword, if any
@@ -3020,8 +3035,8 @@ pub struct FnHeader {
 impl FnHeader {
     /// Does this function header have any qualifiers or is it empty?
     pub fn has_qualifiers(&self) -> bool {
-        let Self { unsafety, coroutine_kind, constness, ext } = self;
-        matches!(unsafety, Unsafe::Yes(_))
+        let Self { safety, coroutine_kind, constness, ext } = self;
+        matches!(safety, Safety::Unsafe(_))
             || coroutine_kind.is_some()
             || matches!(constness, Const::Yes(_))
             || !matches!(ext, Extern::None)
@@ -3031,7 +3046,7 @@ impl FnHeader {
 impl Default for FnHeader {
     fn default() -> FnHeader {
         FnHeader {
-            unsafety: Unsafe::No,
+            safety: Safety::Default,
             coroutine_kind: None,
             constness: Const::No,
             ext: Extern::None,
@@ -3041,7 +3056,7 @@ impl Default for FnHeader {
 
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct Trait {
-    pub unsafety: Unsafe,
+    pub safety: Safety,
     pub is_auto: IsAuto,
     pub generics: Generics,
     pub bounds: GenericBounds,
@@ -3097,7 +3112,7 @@ pub struct TyAlias {
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct Impl {
     pub defaultness: Defaultness,
-    pub unsafety: Unsafe,
+    pub safety: Safety,
     pub generics: Generics,
     pub constness: Const,
     pub polarity: ImplPolarity,
@@ -3120,8 +3135,16 @@ pub struct Delegation {
     /// Path resolution id.
     pub id: NodeId,
     pub qself: Option<P<QSelf>>,
-    pub rename: Option<Ident>,
     pub path: Path,
+    pub rename: Option<Ident>,
+    pub body: Option<P<Block>>,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct DelegationMac {
+    pub qself: Option<P<QSelf>>,
+    pub prefix: Path,
+    pub suffixes: ThinVec<(Ident, Option<Ident>)>,
     pub body: Option<P<Block>>,
 }
 
@@ -3197,7 +3220,7 @@ pub enum ItemKind {
     /// E.g., `mod foo;` or `mod foo { .. }`.
     /// `unsafe` keyword on modules is accepted syntactically for macro DSLs, but not
     /// semantically by Rust.
-    Mod(Unsafe, ModKind),
+    Mod(Safety, ModKind),
     /// An external module (`extern`).
     ///
     /// E.g., `extern {}` or `extern "C" {}`.
@@ -3240,19 +3263,23 @@ pub enum ItemKind {
     /// A macro definition.
     MacroDef(MacroDef),
 
-    /// A delegation item (`reuse`).
+    /// A single delegation item (`reuse`).
     ///
     /// E.g. `reuse <Type as Trait>::name { target_expr_template }`.
     Delegation(Box<Delegation>),
+    /// A list delegation item (`reuse prefix::{a, b, c}`).
+    /// Treated similarly to a macro call and expanded early.
+    DelegationMac(Box<DelegationMac>),
 }
 
 impl ItemKind {
+    /// "a" or "an"
     pub fn article(&self) -> &'static str {
         use ItemKind::*;
         match self {
             Use(..) | Static(..) | Const(..) | Fn(..) | Mod(..) | GlobalAsm(..) | TyAlias(..)
             | Struct(..) | Union(..) | Trait(..) | TraitAlias(..) | MacroDef(..)
-            | Delegation(..) => "a",
+            | Delegation(..) | DelegationMac(..) => "a",
             ExternCrate(..) | ForeignMod(..) | MacCall(..) | Enum(..) | Impl { .. } => "an",
         }
     }
@@ -3277,6 +3304,7 @@ impl ItemKind {
             ItemKind::MacroDef(..) => "macro definition",
             ItemKind::Impl { .. } => "implementation",
             ItemKind::Delegation(..) => "delegated function",
+            ItemKind::DelegationMac(..) => "delegation",
         }
     }
 
@@ -3320,6 +3348,8 @@ pub enum AssocItemKind {
     MacCall(P<MacCall>),
     /// An associated delegation item.
     Delegation(Box<Delegation>),
+    /// An associated delegation item list.
+    DelegationMac(Box<DelegationMac>),
 }
 
 impl AssocItemKind {
@@ -3328,7 +3358,9 @@ impl AssocItemKind {
             Self::Const(box ConstItem { defaultness, .. })
             | Self::Fn(box Fn { defaultness, .. })
             | Self::Type(box TyAlias { defaultness, .. }) => defaultness,
-            Self::MacCall(..) | Self::Delegation(..) => Defaultness::Final,
+            Self::MacCall(..) | Self::Delegation(..) | Self::DelegationMac(..) => {
+                Defaultness::Final
+            }
         }
     }
 }
@@ -3341,6 +3373,7 @@ impl From<AssocItemKind> for ItemKind {
             AssocItemKind::Type(ty_alias_kind) => ItemKind::TyAlias(ty_alias_kind),
             AssocItemKind::MacCall(a) => ItemKind::MacCall(a),
             AssocItemKind::Delegation(delegation) => ItemKind::Delegation(delegation),
+            AssocItemKind::DelegationMac(delegation) => ItemKind::DelegationMac(delegation),
         }
     }
 }
@@ -3355,6 +3388,7 @@ impl TryFrom<ItemKind> for AssocItemKind {
             ItemKind::TyAlias(ty_kind) => AssocItemKind::Type(ty_kind),
             ItemKind::MacCall(a) => AssocItemKind::MacCall(a),
             ItemKind::Delegation(d) => AssocItemKind::Delegation(d),
+            ItemKind::DelegationMac(d) => AssocItemKind::DelegationMac(d),
             _ => return Err(item_kind),
         })
     }

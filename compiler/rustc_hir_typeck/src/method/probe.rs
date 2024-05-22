@@ -15,14 +15,16 @@ use rustc_infer::infer::canonical::{Canonical, QueryResponse};
 use rustc_infer::infer::error_reporting::TypeAnnotationNeeded::E0282;
 use rustc_infer::infer::DefineOpaqueTypes;
 use rustc_infer::infer::{self, InferOk, TyCtxtInferExt};
+use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::middle::stability;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::fast_reject::{simplify_type, TreatParams};
 use rustc_middle::ty::AssocItem;
 use rustc_middle::ty::GenericParamDefKind;
-use rustc_middle::ty::ToPredicate;
+use rustc_middle::ty::Upcast;
 use rustc_middle::ty::{self, ParamEnvAnd, Ty, TyCtxt, TypeVisitableExt};
 use rustc_middle::ty::{GenericArgs, GenericArgsRef};
+use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
 use rustc_span::def_id::DefId;
 use rustc_span::def_id::LocalDefId;
@@ -88,6 +90,11 @@ pub(crate) struct ProbeContext<'a, 'tcx> {
     >,
 
     scope_expr_id: HirId,
+
+    /// Is this probe being done for a diagnostic? This will skip some error reporting
+    /// machinery, since we don't particularly care about, for example, similarly named
+    /// candidates if we're *reporting* similarly named candidates.
+    is_suggestion: IsSuggestion,
 }
 
 impl<'a, 'tcx> Deref for ProbeContext<'a, 'tcx> {
@@ -218,7 +225,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// would use to decide if a method is a plausible fit for
     /// ambiguity purposes).
     #[instrument(level = "debug", skip(self, candidate_filter))]
-    pub fn probe_for_return_type(
+    pub fn probe_for_return_type_for_diagnostic(
         &self,
         span: Span,
         mode: Mode,
@@ -457,6 +464,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 &orig_values,
                 steps.steps,
                 scope_expr_id,
+                is_suggestion,
             );
 
             probe_cx.assemble_inherent_candidates();
@@ -551,6 +559,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         orig_steps_var_values: &'a OriginalQueryValues<'tcx>,
         steps: &'tcx [CandidateStep<'tcx>],
         scope_expr_id: HirId,
+        is_suggestion: IsSuggestion,
     ) -> ProbeContext<'a, 'tcx> {
         ProbeContext {
             fcx,
@@ -568,6 +577,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             static_candidates: RefCell::new(Vec::new()),
             unsatisfied_predicates: RefCell::new(Vec::new()),
             scope_expr_id,
+            is_suggestion,
         }
     }
 
@@ -940,6 +950,18 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
         if let Some(r) = self.pick_core() {
             return r;
+        }
+
+        // If it's a `lookup_probe_for_diagnostic`, then quit early. No need to
+        // probe for other candidates.
+        if self.is_suggestion.0 {
+            return Err(MethodError::NoMatch(NoMatchData {
+                static_candidates: vec![],
+                unsatisfied_predicates: vec![],
+                out_of_scope_traits: vec![],
+                similar_candidate: None,
+                mode: self.mode,
+            }));
         }
 
         debug!("pick: actual search failed, assemble diagnostics");
@@ -1400,16 +1422,12 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     // Convert the bounds into obligations.
                     ocx.register_obligations(traits::predicates_for_generics(
                         |idx, span| {
-                            let code = if span.is_dummy() {
-                                traits::ExprItemObligation(impl_def_id, self.scope_expr_id, idx)
-                            } else {
-                                traits::ExprBindingObligation(
-                                    impl_def_id,
-                                    span,
-                                    self.scope_expr_id,
-                                    idx,
-                                )
-                            };
+                            let code = ObligationCauseCode::WhereClauseInExpr(
+                                impl_def_id,
+                                span,
+                                self.scope_expr_id,
+                                idx,
+                            );
                             ObligationCause::new(self.span, self.body_id, code)
                         },
                         self.param_env,
@@ -1423,6 +1441,18 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                         if self_ty.is_array() && !method_name.span.at_least_rust_2021() {
                             let trait_def = self.tcx.trait_def(poly_trait_ref.def_id());
                             if trait_def.skip_array_during_method_dispatch {
+                                return ProbeResult::NoMatch;
+                            }
+                        }
+
+                        // Some trait methods are excluded for boxed slices before 2024.
+                        // (`boxed_slice.into_iter()` wants a slice iterator for compatibility.)
+                        if self_ty.is_box()
+                            && self_ty.boxed_ty().is_slice()
+                            && !method_name.span.at_least_rust_2024()
+                        {
+                            let trait_def = self.tcx.trait_def(poly_trait_ref.def_id());
+                            if trait_def.skip_boxed_slice_during_method_dispatch {
                                 return ProbeResult::NoMatch;
                             }
                         }
@@ -1478,7 +1508,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                         }
                     }
 
-                    trait_predicate = Some(ty::Binder::dummy(trait_ref).to_predicate(self.tcx));
+                    trait_predicate = Some(trait_ref.upcast(self.tcx));
                 }
                 ObjectCandidate(poly_trait_ref) | WhereClauseCandidate(poly_trait_ref) => {
                     let trait_ref = self.instantiate_binder_with_fresh_vars(
@@ -1633,6 +1663,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 self.orig_steps_var_values,
                 self.steps,
                 self.scope_expr_id,
+                IsSuggestion(true),
             );
             pcx.allow_similar_names = true;
             pcx.assemble_inherent_candidates();
@@ -1735,7 +1766,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let generics = self.tcx.generics_of(method);
         assert_eq!(args.len(), generics.parent_count);
 
-        let xform_fn_sig = if generics.params.is_empty() {
+        let xform_fn_sig = if generics.is_own_empty() {
             fn_sig.instantiate(self.tcx, args)
         } else {
             let args = GenericArgs::for_item(self.tcx, method, |param, _| {

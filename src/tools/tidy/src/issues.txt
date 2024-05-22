@@ -2915,7 +2915,6 @@ ui/macros/issue-95267.rs
 ui/macros/issue-95533.rs
 ui/macros/issue-98466-allow.rs
 ui/macros/issue-98466.rs
-ui/macros/issue-98790.rs
 ui/macros/issue-99261.rs
 ui/macros/issue-99265.rs
 ui/macros/issue-99907.rs
@@ -3862,7 +3861,6 @@ ui/statics/issue-91050-1.rs
 ui/statics/issue-91050-2.rs
 ui/std/issue-3563-3.rs
 ui/std/issue-81357-unsound-file-methods.rs
-ui/stdlib-unit-tests/issue-21058.rs
 ui/structs-enums/enum-rec/issue-17431-6.rs
 ui/structs-enums/enum-rec/issue-17431-7.rs
 ui/structs-enums/issue-103869.rs

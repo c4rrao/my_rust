@@ -452,7 +452,7 @@ impl<T> Trait<T> for X {
                     }
                     (ty::FnPtr(sig), ty::FnDef(def_id, _))
                     | (ty::FnDef(def_id, _), ty::FnPtr(sig)) => {
-                        if tcx.fn_sig(def_id).skip_binder().unsafety() < sig.unsafety() {
+                        if tcx.fn_sig(def_id).skip_binder().safety() < sig.safety() {
                             diag.note(
                                 "unsafe functions cannot be coerced into safe function pointers",
                             );
@@ -629,8 +629,7 @@ impl<T> Trait<T> for X {
                     | hir::Node::ImplItem(hir::ImplItem { kind: hir::ImplItemKind::Fn(..), .. }),
             )
         );
-        let impl_comparison =
-            matches!(cause_code, ObligationCauseCode::CompareImplItemObligation { .. });
+        let impl_comparison = matches!(cause_code, ObligationCauseCode::CompareImplItem { .. });
         let assoc = tcx.associated_item(proj_ty.def_id);
         if impl_comparison {
             // We do not want to suggest calling functions when the reason of the

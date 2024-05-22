@@ -3,9 +3,10 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::LangItem;
 use rustc_index::bit_set::BitSet;
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, EarlyBinder, Ty, TyCtxt, TypeVisitableExt, TypeVisitor};
-use rustc_middle::ty::{ToPredicate, TypeSuperVisitable, TypeVisitable};
+use rustc_middle::ty::{TypeSuperVisitable, TypeVisitable, Upcast};
 use rustc_span::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
 use rustc_span::DUMMY_SP;
 use rustc_trait_selection::traits;
@@ -214,12 +215,12 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ImplTraitInTraitFinder<'_, 'tcx> {
             self.predicates.push(
                 ty::Binder::bind_with_vars(
                     ty::ProjectionPredicate {
-                        projection_ty: shifted_alias_ty,
+                        projection_term: shifted_alias_ty.into(),
                         term: default_ty.into(),
                     },
                     self.bound_vars,
                 )
-                .to_predicate(self.tcx),
+                .upcast(self.tcx),
             );
 
             // We walk the *un-shifted* alias ty, because we're tracking the de bruijn

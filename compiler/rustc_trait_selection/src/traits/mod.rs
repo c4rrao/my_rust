@@ -31,9 +31,10 @@ use crate::traits::error_reporting::TypeErrCtxtExt as _;
 use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
 use rustc_errors::ErrorGuaranteed;
 use rustc_middle::query::Providers;
+use rustc_middle::span_bug;
 use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::visit::{TypeVisitable, TypeVisitableExt};
-use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt, TypeFolder, TypeSuperVisitable};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeFolder, TypeSuperVisitable, Upcast};
 use rustc_middle::ty::{GenericArgs, GenericArgsRef};
 use rustc_span::def_id::DefId;
 use rustc_span::Span;
@@ -51,7 +52,7 @@ pub use self::object_safety::hir_ty_lowering_object_safety_violations;
 pub use self::object_safety::is_vtable_safe_method;
 pub use self::object_safety::object_safety_violations_for_assoc_item;
 pub use self::object_safety::ObjectSafetyViolation;
-pub use self::project::{normalize_inherent_projection, normalize_projection_type};
+pub use self::project::{normalize_inherent_projection, normalize_projection_ty};
 pub use self::select::{EvaluationCache, SelectionCache, SelectionContext};
 pub use self::select::{EvaluationResult, IntercrateAmbiguityCause, OverflowError};
 pub use self::specialize::specialization_graph::FutureCompatOverlapError;
@@ -141,7 +142,7 @@ pub fn type_known_to_meet_bound_modulo_regions<'tcx>(
 fn pred_known_to_hold_modulo_regions<'tcx>(
     infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
-    pred: impl ToPredicate<'tcx>,
+    pred: impl Upcast<TyCtxt<'tcx>, ty::Predicate<'tcx>>,
 ) -> bool {
     let obligation = Obligation::new(infcx.tcx, ObligationCause::dummy(), param_env, pred);
 
@@ -456,7 +457,7 @@ fn instantiate_and_check_impossible_predicates<'tcx>(
     // associated items.
     if let Some(trait_def_id) = tcx.trait_of_item(key.0) {
         let trait_ref = ty::TraitRef::from_method(tcx, trait_def_id, key.1);
-        predicates.push(ty::Binder::dummy(trait_ref).to_predicate(tcx));
+        predicates.push(trait_ref.upcast(tcx));
     }
 
     predicates.retain(|predicate| !predicate.has_param());

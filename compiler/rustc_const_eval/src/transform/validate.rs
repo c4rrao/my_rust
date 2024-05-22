@@ -9,6 +9,7 @@ use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::visit::{NonUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, InstanceDef, ParamEnv, Ty, TyCtxt, TypeVisitableExt, Variance};
+use rustc_middle::{bug, span_bug};
 use rustc_target::abi::{Size, FIRST_VARIANT};
 use rustc_target::spec::abi::Abi;
 
@@ -1036,8 +1037,8 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                             )
                         }
                     }
-                    AddUnchecked | SubUnchecked | MulUnchecked | Shl | ShlUnchecked | Shr
-                    | ShrUnchecked => {
+                    AddUnchecked | AddWithOverflow | SubUnchecked | SubWithOverflow
+                    | MulUnchecked | MulWithOverflow | Shl | ShlUnchecked | Shr | ShrUnchecked => {
                         for x in [a, b] {
                             check_kinds!(
                                 x,
@@ -1064,31 +1065,6 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                             )
                         }
                     }
-                }
-            }
-            Rvalue::CheckedBinaryOp(op, vals) => {
-                use BinOp::*;
-                let a = vals.0.ty(&self.body.local_decls, self.tcx);
-                let b = vals.1.ty(&self.body.local_decls, self.tcx);
-                match op {
-                    Add | Sub | Mul => {
-                        for x in [a, b] {
-                            check_kinds!(
-                                x,
-                                "Cannot perform checked arithmetic on type {:?}",
-                                ty::Uint(..) | ty::Int(..)
-                            )
-                        }
-                        if a != b {
-                            self.fail(
-                                location,
-                                format!(
-                                    "Cannot perform checked arithmetic on unequal types {a:?} and {b:?}"
-                                ),
-                            );
-                        }
-                    }
-                    _ => self.fail(location, format!("There is no checked version of {op:?}")),
                 }
             }
             Rvalue::UnaryOp(op, operand) => {
@@ -1291,7 +1267,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
             )) => {
                 let src_ty = src.ty(&self.body.local_decls, self.tcx);
                 let op_src_ty = if let Some(src_deref) = src_ty.builtin_deref(true) {
-                    src_deref.ty
+                    src_deref
                 } else {
                     self.fail(
                         location,
@@ -1301,7 +1277,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                 };
                 let dst_ty = dst.ty(&self.body.local_decls, self.tcx);
                 let op_dst_ty = if let Some(dst_deref) = dst_ty.builtin_deref(true) {
-                    dst_deref.ty
+                    dst_deref
                 } else {
                     self.fail(
                         location,

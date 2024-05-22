@@ -1,6 +1,5 @@
 use rustc_hir::{def::DefKind, Body, Item, ItemKind, Node, TyKind};
 use rustc_hir::{Path, QPath};
-use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::infer::InferCtxt;
 use rustc_infer::traits::{Obligation, ObligationCause};
 use rustc_middle::ty::{self, Binder, Ty, TyCtxt, TypeFoldable, TypeFolder};
@@ -39,7 +38,7 @@ declare_lint! {
     ///
     /// Creating non-local definitions go against expectation and can create discrepancies
     /// in tooling. It should be avoided. It may become deny-by-default in edition 2024
-    /// and higher, see see the tracking issue <https://github.com/rust-lang/rust/issues/120363>.
+    /// and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>.
     ///
     /// An `impl` definition is non-local if it is nested inside an item and neither
     /// the type nor the trait are at the same nesting level as the `impl` block.
@@ -337,7 +336,7 @@ impl<'a, 'tcx, F: FnMut(DefId) -> bool> TypeFolder<TyCtxt<'tcx>>
         if let Some(def) = t.ty_adt_def()
             && (self.did_has_local_parent)(def.did())
         {
-            self.infcx.next_ty_var(TypeVariableOrigin { param_def_id: None, span: self.infer_span })
+            self.infcx.next_ty_var(self.infer_span)
         } else {
             t.super_fold_with(self)
         }

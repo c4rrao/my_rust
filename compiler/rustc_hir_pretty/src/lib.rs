@@ -139,8 +139,12 @@ impl std::ops::DerefMut for State<'_> {
 }
 
 impl<'a> PrintState<'a> for State<'a> {
-    fn comments(&mut self) -> &mut Option<Comments<'a>> {
-        &mut self.comments
+    fn comments(&self) -> Option<&Comments<'a>> {
+        self.comments.as_ref()
+    }
+
+    fn comments_mut(&mut self) -> Option<&mut Comments<'a>> {
+        self.comments.as_mut()
     }
 
     fn ann_post(&mut self, ident: Ident) {
@@ -283,7 +287,7 @@ impl<'a> State<'a> {
                 self.pclose();
             }
             hir::TyKind::BareFn(f) => {
-                self.print_ty_fn(f.abi, f.unsafety, f.decl, None, f.generic_params, f.param_names);
+                self.print_ty_fn(f.abi, f.safety, f.decl, None, f.generic_params, f.param_names);
             }
             hir::TyKind::OpaqueDef(..) => self.word("/*impl Trait*/"),
             hir::TyKind::Path(ref qpath) => self.print_qpath(qpath, false),
@@ -347,7 +351,7 @@ impl<'a> State<'a> {
                 self.print_fn(
                     decl,
                     hir::FnHeader {
-                        unsafety: hir::Unsafety::Normal,
+                        safety: hir::Safety::Safe,
                         constness: hir::Constness::NotConst,
                         abi: Abi::Rust,
                         asyncness: hir::IsAsync::NotAsync,
@@ -578,7 +582,7 @@ impl<'a> State<'a> {
                 self.print_struct(struct_def, generics, item.ident.name, item.span, true);
             }
             hir::ItemKind::Impl(&hir::Impl {
-                unsafety,
+                safety,
                 polarity,
                 defaultness,
                 defaultness_span: _,
@@ -589,7 +593,7 @@ impl<'a> State<'a> {
             }) => {
                 self.head("");
                 self.print_defaultness(defaultness);
-                self.print_unsafety(unsafety);
+                self.print_safety(safety);
                 self.word_nbsp("impl");
 
                 if !generics.params.is_empty() {
@@ -618,10 +622,10 @@ impl<'a> State<'a> {
                 }
                 self.bclose(item.span);
             }
-            hir::ItemKind::Trait(is_auto, unsafety, generics, bounds, trait_items) => {
+            hir::ItemKind::Trait(is_auto, safety, generics, bounds, trait_items) => {
                 self.head("");
                 self.print_is_auto(is_auto);
-                self.print_unsafety(unsafety);
+                self.print_safety(safety);
                 self.word_nbsp("trait");
                 self.print_ident(item.ident);
                 self.print_generic_params(generics.params);
@@ -1450,7 +1454,7 @@ impl<'a> State<'a> {
                     self.word_space(":");
                 }
                 // containing cbox, will be closed by print-block at `}`
-                self.cbox(INDENT_UNIT);
+                self.cbox(0);
                 // head-box, will be closed by print-block after `{`
                 self.ibox(0);
                 self.print_block(blk);
@@ -2230,7 +2234,7 @@ impl<'a> State<'a> {
     fn print_ty_fn(
         &mut self,
         abi: Abi,
-        unsafety: hir::Unsafety,
+        safety: hir::Safety,
         decl: &hir::FnDecl<'_>,
         name: Option<Symbol>,
         generic_params: &[hir::GenericParam<'_>],
@@ -2242,7 +2246,7 @@ impl<'a> State<'a> {
         self.print_fn(
             decl,
             hir::FnHeader {
-                unsafety,
+                safety,
                 abi,
                 constness: hir::Constness::NotConst,
                 asyncness: hir::IsAsync::NotAsync,
@@ -2263,7 +2267,7 @@ impl<'a> State<'a> {
             hir::IsAsync::Async(_) => self.word_nbsp("async"),
         }
 
-        self.print_unsafety(header.unsafety);
+        self.print_safety(header.safety);
 
         if header.abi != Abi::Rust {
             self.word_nbsp("extern");
@@ -2280,10 +2284,10 @@ impl<'a> State<'a> {
         }
     }
 
-    fn print_unsafety(&mut self, s: hir::Unsafety) {
+    fn print_safety(&mut self, s: hir::Safety) {
         match s {
-            hir::Unsafety::Normal => {}
-            hir::Unsafety::Unsafe => self.word_nbsp("unsafe"),
+            hir::Safety::Safe => {}
+            hir::Safety::Unsafe => self.word_nbsp("unsafe"),
         }
     }
 

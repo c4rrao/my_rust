@@ -453,7 +453,15 @@ fn clean_projection_predicate<'tcx>(
     cx: &mut DocContext<'tcx>,
 ) -> WherePredicate {
     WherePredicate::EqPredicate {
-        lhs: clean_projection(pred.map_bound(|p| p.projection_ty), cx, None),
+        lhs: clean_projection(
+            pred.map_bound(|p| {
+                // FIXME: This needs to be made resilient for `AliasTerm`s that
+                // are associated consts.
+                p.projection_term.expect_ty(cx.tcx)
+            }),
+            cx,
+            None,
+        ),
         rhs: clean_middle_term(pred.map_bound(|p| p.term), cx),
     }
 }
@@ -795,7 +803,7 @@ fn clean_ty_generics<'tcx>(
     let mut impl_trait = BTreeMap::<u32, Vec<GenericBound>>::default();
 
     let params: ThinVec<_> = gens
-        .params
+        .own_params
         .iter()
         .filter(|param| match param.kind {
             ty::GenericParamDefKind::Lifetime => !param.is_anonymous_lifetime(),
@@ -838,7 +846,7 @@ fn clean_ty_generics<'tcx>(
                         }
                     }
                     ty::ClauseKind::Projection(p) => {
-                        if let ty::Param(param) = p.projection_ty.self_ty().kind() {
+                        if let ty::Param(param) = p.projection_term.self_ty().kind() {
                             projection = Some(bound_p.rebind(p));
                             return Some(param.index);
                         }
@@ -857,7 +865,15 @@ fn clean_ty_generics<'tcx>(
                 bounds.extend(pred.get_bounds().into_iter().flatten().cloned());
 
                 if let Some(proj) = projection
-                    && let lhs = clean_projection(proj.map_bound(|p| p.projection_ty), cx, None)
+                    && let lhs = clean_projection(
+                        proj.map_bound(|p| {
+                            // FIXME: This needs to be made resilient for `AliasTerm`s that
+                            // are associated consts.
+                            p.projection_term.expect_ty(cx.tcx)
+                        }),
+                        cx,
+                        None,
+                    )
                     && let Some((_, trait_did, name)) = lhs.projection()
                 {
                     impl_trait_proj.entry(param_idx).or_default().push((
@@ -1860,9 +1876,9 @@ fn normalize<'tcx>(
         return None;
     }
 
-    use crate::rustc_trait_selection::infer::TyCtxtInferExt;
-    use crate::rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
     use rustc_middle::traits::ObligationCause;
+    use rustc_trait_selection::infer::TyCtxtInferExt;
+    use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
 
     // Try to normalize `<X as Y>::T` to a type
     let infcx = cx.tcx.infer_ctxt().build();
@@ -1988,7 +2004,7 @@ impl<'tcx> ContainerTy<'_, 'tcx> {
                 let generics = tcx.generics_of(container);
                 debug_assert_eq!(generics.parent_count, 0);
 
-                let param = generics.params[index].def_id;
+                let param = generics.own_params[index].def_id;
                 let default = tcx.object_lifetime_default(param);
                 match default {
                     rbv::ObjectLifetimeDefault::Param(lifetime) => {
@@ -2061,7 +2077,7 @@ pub(crate) fn clean_middle_ty<'tcx>(
             let generic_params = clean_bound_vars(sig.bound_vars());
 
             BareFunction(Box::new(BareFunctionDecl {
-                unsafety: sig.unsafety(),
+                safety: sig.safety(),
                 generic_params,
                 decl,
                 abi: sig.abi(),
@@ -2126,7 +2142,10 @@ pub(crate) fn clean_middle_ty<'tcx>(
                                 // HACK(compiler-errors): Doesn't actually matter what self
                                 // type we put here, because we're only using the GAT's args.
                                 .with_self_ty(cx.tcx, cx.tcx.types.self_param)
-                                .projection_ty
+                                .projection_term
+                                // FIXME: This needs to be made resilient for `AliasTerm`s
+                                // that are associated consts.
+                                .expect_ty(cx.tcx)
                         }),
                         cx,
                     ),
@@ -2284,10 +2303,12 @@ fn clean_middle_opaque_bounds<'tcx>(
                 .iter()
                 .filter_map(|bound| {
                     if let ty::ClauseKind::Projection(proj) = bound.kind().skip_binder() {
-                        if proj.projection_ty.trait_ref(cx.tcx) == trait_ref.skip_binder() {
+                        if proj.projection_term.trait_ref(cx.tcx) == trait_ref.skip_binder() {
                             Some(TypeBinding {
                                 assoc: projection_to_path_segment(
-                                    bound.kind().rebind(proj.projection_ty),
+                                    // FIXME: This needs to be made resilient for `AliasTerm`s that
+                                    // are associated consts.
+                                    bound.kind().rebind(proj.projection_term.expect_ty(cx.tcx)),
                                     cx,
                                 ),
                                 kind: TypeBindingKind::Equality {
@@ -2544,7 +2565,7 @@ fn clean_bare_fn_ty<'tcx>(
         let decl = clean_fn_decl_with_args(cx, bare_fn.decl, None, args);
         (generic_params, decl)
     });
-    BareFunctionDecl { unsafety: bare_fn.unsafety, abi: bare_fn.abi, decl, generic_params }
+    BareFunctionDecl { safety: bare_fn.safety, abi: bare_fn.abi, decl, generic_params }
 }
 
 pub(crate) fn reexport_chain<'tcx>(
@@ -2853,7 +2874,7 @@ fn clean_impl<'tcx>(
         });
     let mut make_item = |trait_: Option<Path>, for_: Type, items: Vec<Item>| {
         let kind = ImplItem(Box::new(Impl {
-            unsafety: impl_.unsafety,
+            safety: impl_.safety,
             generics: clean_generics(impl_.generics, cx),
             trait_,
             for_,

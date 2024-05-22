@@ -82,10 +82,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
 
         // The rest either implements the logic, or falls back to `lookup_exported_symbol`.
-        match this.emulate_foreign_item_inner(link_name, abi, args, dest, unwind)? {
-            EmulateItemResult::NeedsJumping => {
+        match this.emulate_foreign_item_inner(link_name, abi, args, dest)? {
+            EmulateItemResult::NeedsReturn => {
                 trace!("{:?}", this.dump_place(&dest.clone().into()));
                 this.return_to_block(ret)?;
+            }
+            EmulateItemResult::NeedsUnwind => {
+                // Jump to the unwind block to begin unwinding.
+                this.unwind_to_block(unwind)?;
             }
             EmulateItemResult::AlreadyJumped => (),
             EmulateItemResult::NotSupported => {
@@ -93,7 +97,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     return Ok(Some(body));
                 }
 
-                this.handle_unsupported(format!(
+                this.handle_unsupported_foreign_item(format!(
                     "can't call foreign function `{link_name}` on OS `{os}`",
                     os = this.tcx.sess.target.os,
                 ))?;
@@ -102,6 +106,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
 
         Ok(None)
+    }
+
+    fn is_dyn_sym(&self, name: &str) -> bool {
+        let this = self.eval_context_ref();
+        match this.tcx.sess.target.os.as_ref() {
+            os if this.target_os_is_unix() => shims::unix::foreign_items::is_dyn_sym(name, os),
+            "wasi" => shims::wasi::foreign_items::is_dyn_sym(name),
+            "windows" => shims::windows::foreign_items::is_dyn_sym(name),
+            _ => false,
+        }
     }
 
     /// Emulates a call to a `DynSym`.
@@ -196,19 +210,18 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         abi: Abi,
         args: &[OpTy<'tcx, Provenance>],
         dest: &MPlaceTy<'tcx, Provenance>,
-        unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         // First deal with any external C functions in linked .so file.
         #[cfg(target_os = "linux")]
-        if this.machine.external_so_lib.as_ref().is_some() {
-            use crate::shims::ffi_support::EvalContextExt as _;
+        if this.machine.native_lib.as_ref().is_some() {
+            use crate::shims::native_lib::EvalContextExt as _;
             // An Ok(false) here means that the function being called was not exported
             // by the specified `.so` file; we should continue and check if it corresponds to
             // a provided shim.
-            if this.call_external_c_fct(link_name, dest, args)? {
-                return Ok(EmulateItemResult::NeedsJumping);
+            if this.call_native_fn(link_name, dest, args)? {
+                return Ok(EmulateItemResult::NeedsReturn);
             }
         }
 
@@ -253,9 +266,9 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         match link_name.as_str() {
             // Miri-specific extern functions
             "miri_start_unwind" => {
-                // `check_shim` happens inside `handle_miri_start_unwind`.
-                this.handle_miri_start_unwind(abi, link_name, args, unwind)?;
-                return Ok(EmulateItemResult::AlreadyJumped);
+                let [payload] = this.check_shim(abi, Abi::Rust, link_name, args)?;
+                this.handle_miri_start_unwind(payload)?;
+                return Ok(EmulateItemResult::NeedsUnwind);
             }
             "miri_run_provenance_gc" => {
                 let [] = this.check_shim(abi, Abi::Rust, link_name, args)?;
@@ -396,14 +409,8 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             }
 
             // Aborting the process.
-            "exit" | "ExitProcess" => {
-                let exp_abi = if link_name.as_str() == "exit" {
-                    Abi::C { unwind: false }
-                } else {
-                    Abi::System { unwind: false }
-                };
-                let [code] = this.check_shim(abi, exp_abi, link_name, args)?;
-                // it's really u32 for ExitProcess, but we have to put it into the `Exit` variant anyway
+            "exit" => {
+                let [code] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let code = this.read_scalar(code)?.to_i32()?;
                 throw_machine_stop!(TerminationInfo::Exit { code: code.into(), leak_check: false });
             }
@@ -418,7 +425,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             "malloc" => {
                 let [size] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let size = this.read_target_usize(size)?;
-                let res = this.malloc(size, /*zero_init:*/ false, MiriMemoryKind::C)?;
+                let res = this.malloc(size, /*zero_init:*/ false)?;
                 this.write_pointer(res, dest)?;
             }
             "calloc" => {
@@ -429,20 +436,20 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let size = items
                     .checked_mul(len)
                     .ok_or_else(|| err_ub_format!("overflow during calloc size computation"))?;
-                let res = this.malloc(size, /*zero_init:*/ true, MiriMemoryKind::C)?;
+                let res = this.malloc(size, /*zero_init:*/ true)?;
                 this.write_pointer(res, dest)?;
             }
             "free" => {
                 let [ptr] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
-                this.free(ptr, MiriMemoryKind::C)?;
+                this.free(ptr)?;
             }
             "realloc" => {
                 let [old_ptr, new_size] =
                     this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let old_ptr = this.read_pointer(old_ptr)?;
                 let new_size = this.read_target_usize(new_size)?;
-                let res = this.realloc(old_ptr, new_size, MiriMemoryKind::C)?;
+                let res = this.realloc(old_ptr, new_size)?;
                 this.write_pointer(res, dest)?;
             }
 
@@ -476,7 +483,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     "__rust_alloc" => return this.emulate_allocator(default),
                     "miri_alloc" => {
                         default(this)?;
-                        return Ok(EmulateItemResult::NeedsJumping);
+                        return Ok(EmulateItemResult::NeedsReturn);
                     }
                     _ => unreachable!(),
                 }
@@ -536,7 +543,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     }
                     "miri_dealloc" => {
                         default(this)?;
-                        return Ok(EmulateItemResult::NeedsJumping);
+                        return Ok(EmulateItemResult::NeedsReturn);
                     }
                     _ => unreachable!(),
                 }
@@ -654,6 +661,16 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     dest,
                 )?;
             }
+            "wcslen" => {
+                let [ptr] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let ptr = this.read_pointer(ptr)?;
+                // This reads at least 1 byte, so we are already enforcing that this is a valid pointer.
+                let n = this.read_wchar_t_str(ptr)?.len();
+                this.write_scalar(
+                    Scalar::from_target_usize(u64::try_from(n).unwrap(), this),
+                    dest,
+                )?;
+            }
             "memcpy" => {
                 let [ptr_dest, ptr_src, n] =
                     this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
@@ -702,7 +719,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             => {
                 let [f] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let f = this.read_scalar(f)?.to_f32()?;
-                // FIXME: Using host floats.
+                // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let f_host = f.to_host();
                 let res = match link_name.as_str() {
                     "cbrtf" => f_host.cbrt(),
@@ -733,7 +750,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let f2 = this.read_scalar(f2)?.to_f32()?;
                 // underscore case for windows, here and below
                 // (see https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/floating-point-primitives?view=vs-2019)
-                // FIXME: Using host floats.
+                // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let res = match link_name.as_str() {
                     "_hypotf" | "hypotf" => f1.to_host().hypot(f2.to_host()).to_soft(),
                     "atan2f" => f1.to_host().atan2(f2.to_host()).to_soft(),
@@ -759,7 +776,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             => {
                 let [f] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let f = this.read_scalar(f)?.to_f64()?;
-                // FIXME: Using host floats.
+                // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let f_host = f.to_host();
                 let res = match link_name.as_str() {
                     "cbrt" => f_host.cbrt(),
@@ -790,7 +807,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let f2 = this.read_scalar(f2)?.to_f64()?;
                 // underscore case for windows, here and below
                 // (see https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/floating-point-primitives?view=vs-2019)
-                // FIXME: Using host floats.
+                // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let res = match link_name.as_str() {
                     "_hypot" | "hypot" => f1.to_host().hypot(f2.to_host()).to_soft(),
                     "atan2" => f1.to_host().atan2(f2.to_host()).to_soft(),
@@ -820,7 +837,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let x = this.read_scalar(x)?.to_f32()?;
                 let signp = this.deref_pointer(signp)?;
 
-                // FIXME: Using host floats.
+                // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let (res, sign) = x.to_host().ln_gamma();
                 this.write_int(sign, &signp)?;
                 let res = this.adjust_nan(res.to_soft(), &[x]);
@@ -831,7 +848,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let x = this.read_scalar(x)?.to_f64()?;
                 let signp = this.deref_pointer(signp)?;
 
-                // FIXME: Using host floats.
+                // Using host floats (but it's fine, these operations do not have guaranteed precision).
                 let (res, sign) = x.to_host().ln_gamma();
                 this.write_int(sign, &signp)?;
                 let res = this.adjust_nan(res.to_soft(), &[x]);
@@ -865,6 +882,38 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     throw_unsup_format!("unsupported `llvm.prefetch` type argument: {}", ty);
                 }
             }
+            // Used to implement the x86 `_mm{,256,512}_popcnt_epi{8,16,32,64}` and wasm
+            // `{i,u}8x16_popcnt` functions.
+            name if name.starts_with("llvm.ctpop.v") => {
+                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+
+                let (op, op_len) = this.operand_to_simd(op)?;
+                let (dest, dest_len) = this.mplace_to_simd(dest)?;
+
+                assert_eq!(dest_len, op_len);
+
+                for i in 0..dest_len {
+                    let op = this.read_immediate(&this.project_index(&op, i)?)?;
+                    // Use `to_uint` to get a zero-extended `u128`. Those
+                    // extra zeros will not affect `count_ones`.
+                    let res = op.to_scalar().to_uint(op.layout.size)?.count_ones();
+
+                    this.write_scalar(
+                        Scalar::from_uint(res, op.layout.size),
+                        &this.project_index(&dest, i)?,
+                    )?;
+                }
+            }
+
+            // Target-specific shims
+            name if name.starts_with("llvm.x86.")
+                && (this.tcx.sess.target.arch == "x86"
+                    || this.tcx.sess.target.arch == "x86_64") =>
+            {
+                return shims::x86::EvalContextExt::emulate_x86_intrinsic(
+                    this, link_name, abi, args, dest,
+                );
+            }
             // FIXME: Move these to an `arm` submodule.
             "llvm.aarch64.isb" if this.tcx.sess.target.arch == "aarch64" => {
                 let [arg] = this.check_shim(abi, Abi::Unadjusted, link_name, args)?;
@@ -895,43 +944,15 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 }
             }
 
-            // Used to implement the x86 `_mm{,256,512}_popcnt_epi{8,16,32,64}` and wasm
-            // `{i,u}8x16_popcnt` functions.
-            name if name.starts_with("llvm.ctpop.v") => {
-                let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
-
-                let (op, op_len) = this.operand_to_simd(op)?;
-                let (dest, dest_len) = this.mplace_to_simd(dest)?;
-
-                assert_eq!(dest_len, op_len);
-
-                for i in 0..dest_len {
-                    let op = this.read_immediate(&this.project_index(&op, i)?)?;
-                    // Use `to_uint` to get a zero-extended `u128`. Those
-                    // extra zeros will not affect `count_ones`.
-                    let res = op.to_scalar().to_uint(op.layout.size)?.count_ones();
-
-                    this.write_scalar(
-                        Scalar::from_uint(res, op.layout.size),
-                        &this.project_index(&dest, i)?,
-                    )?;
-                }
-            }
-
-            name if name.starts_with("llvm.x86.")
-                && (this.tcx.sess.target.arch == "x86"
-                    || this.tcx.sess.target.arch == "x86_64") =>
-            {
-                return shims::x86::EvalContextExt::emulate_x86_intrinsic(
-                    this, link_name, abi, args, dest,
-                );
-            }
-
             // Platform-specific shims
             _ =>
                 return match this.tcx.sess.target.os.as_ref() {
                     _ if this.target_os_is_unix() =>
                         shims::unix::foreign_items::EvalContextExt::emulate_foreign_item_inner(
+                            this, link_name, abi, args, dest,
+                        ),
+                    "wasi" =>
+                        shims::wasi::foreign_items::EvalContextExt::emulate_foreign_item_inner(
                             this, link_name, abi, args, dest,
                         ),
                     "windows" =>
@@ -943,6 +964,6 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         };
         // We only fall through to here if we did *not* hit the `_` arm above,
         // i.e., if we actually emulated the function with one of the shims.
-        Ok(EmulateItemResult::NeedsJumping)
+        Ok(EmulateItemResult::NeedsReturn)
     }
 }

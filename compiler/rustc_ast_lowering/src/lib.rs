@@ -1283,7 +1283,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         fields.iter().enumerate().map(|f| this.lower_field_def(f)),
                     );
                     let span = t.span;
-                    let variant_data = hir::VariantData::Struct { fields, recovered: false };
+                    let variant_data =
+                        hir::VariantData::Struct { fields, recovered: ast::Recovered::No };
                     // FIXME: capture the generics from the outer adt.
                     let generics = hir::Generics::empty();
                     let kind = match t.kind {
@@ -1323,7 +1324,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 let generic_params = self.lower_lifetime_binder(t.id, &f.generic_params);
                 hir::TyKind::BareFn(self.arena.alloc(hir::BareFnTy {
                     generic_params,
-                    unsafety: self.lower_unsafety(f.unsafety),
+                    safety: self.lower_safety(f.safety),
                     abi: self.lower_extern(f.ext),
                     decl: self.lower_fn_decl(&f.decl, t.id, t.span, FnDeclKind::Pointer, None),
                     param_names: self.lower_fn_params_to_names(&f.decl),
@@ -1406,7 +1407,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         bounds,
                         fn_kind,
                         itctx,
-                        precise_capturing.as_deref().map(|(args, _)| args.as_slice()),
+                        precise_capturing.as_deref().map(|(args, span)| (args.as_slice(), *span)),
                     ),
                     ImplTraitContext::Universal => {
                         if let Some(&(_, span)) = precise_capturing.as_deref() {
@@ -1522,7 +1523,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         bounds: &GenericBounds,
         fn_kind: Option<FnDeclKind>,
         itctx: ImplTraitContext,
-        precise_capturing_args: Option<&[PreciseCapturingArg]>,
+        precise_capturing_args: Option<(&[PreciseCapturingArg], Span)>,
     ) -> hir::TyKind<'hir> {
         // Make sure we know that some funky desugaring has been going on here.
         // This is a first: there is code in other places like for loop
@@ -1532,7 +1533,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let opaque_ty_span = self.mark_span_with_reason(DesugaringKind::OpaqueTy, span, None);
 
         let captured_lifetimes_to_duplicate =
-            if let Some(precise_capturing) = precise_capturing_args {
+            if let Some((precise_capturing, _)) = precise_capturing_args {
                 // We'll actually validate these later on; all we need is the list of
                 // lifetimes to duplicate during this portion of lowering.
                 precise_capturing
@@ -1606,7 +1607,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         captured_lifetimes_to_duplicate: FxIndexSet<Lifetime>,
         span: Span,
         opaque_ty_span: Span,
-        precise_capturing_args: Option<&[PreciseCapturingArg]>,
+        precise_capturing_args: Option<(&[PreciseCapturingArg], Span)>,
         lower_item_bounds: impl FnOnce(&mut Self) -> &'hir [hir::GenericBound<'hir>],
     ) -> hir::TyKind<'hir> {
         let opaque_ty_def_id = self.create_def(
@@ -1697,8 +1698,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 this.with_remapping(captured_to_synthesized_mapping, |this| {
                     (
                         lower_item_bounds(this),
-                        precise_capturing_args.map(|precise_capturing| {
-                            this.lower_precise_capturing_args(precise_capturing)
+                        precise_capturing_args.map(|(precise_capturing, span)| {
+                            (
+                                this.lower_precise_capturing_args(precise_capturing),
+                                this.lower_span(span),
+                            )
                         }),
                     )
                 });

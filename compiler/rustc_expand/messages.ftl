@@ -10,6 +10,11 @@ expand_attribute_meta_item =
 expand_attribute_single_word =
     attribute must only be a single word
 
+expand_attributes_on_expressions_experimental =
+    attributes on expressions are experimental
+    .help_outer_doc = `///` is used for outer documentation comments; for a plain comment, use `//`
+    .help_inner_doc = `//!` is used for inner documentation comments; for a plain comment, use `//` by removing the `!` or inserting a space in between them: `// !`
+
 expand_attributes_wrong_form =
     attribute must be of form: `attributes(foo, bar)`
 
@@ -29,6 +34,9 @@ expand_custom_attribute_panicked =
 expand_duplicate_matcher_binding = duplicate matcher binding
     .label = duplicate binding
     .label2 = previous binding
+
+expand_empty_delegation_list =
+    empty list delegation is not supported
 
 expand_expected_paren_or_brace =
     expected `(` or `{"{"}`, found `{$token}`

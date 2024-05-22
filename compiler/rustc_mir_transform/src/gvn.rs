@@ -91,6 +91,7 @@ use rustc_hir::def::DefKind;
 use rustc_index::bit_set::BitSet;
 use rustc_index::newtype_index;
 use rustc_index::IndexVec;
+use rustc_middle::bug;
 use rustc_middle::mir::interpret::GlobalAlloc;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
@@ -594,7 +595,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let ty = place.ty(self.local_decls, self.tcx).ty;
                 if let Some(Mutability::Not) = ty.ref_mutability()
                     && let Some(pointee_ty) = ty.builtin_deref(true)
-                    && pointee_ty.ty.is_freeze(self.tcx, self.param_env)
+                    && pointee_ty.is_freeze(self.tcx, self.param_env)
                 {
                     // An immutable borrow `_x` always points to the same value for the
                     // lifetime of the borrow, so we can merge all instances of `*_x`.
@@ -830,23 +831,18 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 // on both operands for side effect.
                 let lhs = lhs?;
                 let rhs = rhs?;
-                if let Some(value) = self.simplify_binary(op, false, ty, lhs, rhs) {
-                    return Some(value);
+
+                if let Some(op) = op.overflowing_to_wrapping() {
+                    if let Some(value) = self.simplify_binary(op, true, ty, lhs, rhs) {
+                        return Some(value);
+                    }
+                    Value::CheckedBinaryOp(op, lhs, rhs)
+                } else {
+                    if let Some(value) = self.simplify_binary(op, false, ty, lhs, rhs) {
+                        return Some(value);
+                    }
+                    Value::BinaryOp(op, lhs, rhs)
                 }
-                Value::BinaryOp(op, lhs, rhs)
-            }
-            Rvalue::CheckedBinaryOp(op, box (ref mut lhs, ref mut rhs)) => {
-                let ty = lhs.ty(self.local_decls, self.tcx);
-                let lhs = self.simplify_operand(lhs, location);
-                let rhs = self.simplify_operand(rhs, location);
-                // Only short-circuit options after we called `simplify_operand`
-                // on both operands for side effect.
-                let lhs = lhs?;
-                let rhs = rhs?;
-                if let Some(value) = self.simplify_binary(op, true, ty, lhs, rhs) {
-                    return Some(value);
-                }
-                Value::CheckedBinaryOp(op, lhs, rhs)
             }
             Rvalue::UnaryOp(op, ref mut arg) => {
                 let arg = self.simplify_operand(arg, location)?;
@@ -1133,9 +1129,9 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         if let Value::Cast { kind, from, to, .. } = self.get(inner)
             && let CastKind::PointerCoercion(ty::adjustment::PointerCoercion::Unsize) = kind
             && let Some(from) = from.builtin_deref(true)
-            && let ty::Array(_, len) = from.ty.kind()
+            && let ty::Array(_, len) = from.kind()
             && let Some(to) = to.builtin_deref(true)
-            && let ty::Slice(..) = to.ty.kind()
+            && let ty::Slice(..) = to.kind()
         {
             return self.insert_constant(Const::from_ty_const(*len, self.tcx));
         }

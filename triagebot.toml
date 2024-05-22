@@ -9,11 +9,14 @@ allow-unauthenticated = [
     "E-*",
     "F-*",
     "I-*",
+    "L-*",
     "NLL-*",
     "O-*",
+    "PG-*",
     "S-*",
     "T-*",
     "WG-*",
+    "-Z*",
     "beta-nominated",
     "const-hack",
     "llvm-*",
@@ -106,12 +109,18 @@ resolved/implemented on Fuchsia. Could one of you weigh in?
 """
 label = "O-fuchsia"
 
-[ping.macos]
+[ping.apple]
+alias = ["macos", "ios", "tvos", "watchos", "visionos"]
 message = """\
-Hey MacOS Group! This issue or PR could use some MacOS-specific guidance. Could one
-of you weigh in? Thanks <3
+Hey Apple notification group! This issue or PR could use some Apple-specific
+guidance. Could one of you weigh in? Thanks <3
+
+(In case it's useful, here are some [instructions] for tackling these sorts of
+issues).
+
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/apple.html
 """
-label = "O-macos"
+label = "O-apple"
 
 [prioritize]
 label = "I-prioritize"
@@ -227,7 +236,9 @@ trigger_files = [
 
 [autolabel."O-macos"]
 trigger_files = [
-    "library/std/src/os/macos"
+    "library/std/src/os/macos",
+    "library/std/src/sys/pal/unix/thread_parking/darwin.rs",
+    "compiler/rustc_target/src/spec/base/apple",
 ]
 
 [autolabel."O-netbsd"]
@@ -302,7 +313,7 @@ trigger_files = [
     "configure",
     "Cargo.toml",
     "config.example.toml",
-    "src/stage0.json",
+    "src/stage0",
     "src/tools/compiletest",
     "src/tools/tidy",
     "src/tools/rustdoc-gui-test",
@@ -362,7 +373,7 @@ trigger_files = [
 [autolabel."T-release"]
 trigger_files = [
     "RELEASES.md",
-    "src/stage0.json",
+    "src/stage0",
     "src/version"
 ]
 
@@ -411,7 +422,7 @@ message_on_add = """\
 - Priority?
 - Regression?
 - Notify people/groups?
-- Needs `I-nominated`?
+- Needs `I-{team}-nominated`?
 """
 message_on_remove = "Issue #{number}'s prioritization request has been removed."
 message_on_close = "Issue #{number} has been closed while requested for prioritization."
@@ -856,6 +867,7 @@ compiler-team-contributors = [
     "@fmease",
     "@fee1-dead",
     "@jieyouxu",
+    "@BoxyUwU",
 ]
 compiler = [
     "compiler-team",
@@ -925,11 +937,13 @@ arena = [
 mir = [
     "@davidtwco",
     "@oli-obk",
-    "@matthewjasper"
+    "@matthewjasper",
+    "@saethlin",
 ]
 mir-opt = [
     "@oli-obk",
     "@wesleywiser",
+    "@saethlin",
 ]
 types = [
     "@compiler-errors",
@@ -995,6 +1009,7 @@ project-exploit-mitigations = [
 "/compiler/rustc_lexer" =                                ["compiler", "lexer"]
 "/compiler/rustc_llvm" =                                 ["@cuviper"]
 "/compiler/rustc_codegen_llvm/src/debuginfo" =           ["compiler", "debuginfo"]
+"/compiler/rustc_codegen_ssa" =                          ["compiler", "@saethlin"]
 "/compiler/rustc_middle/src/mir" =                       ["compiler", "mir"]
 "/compiler/rustc_middle/src/traits" =                    ["compiler", "types"]
 "/compiler/rustc_middle/src/ty" =                        ["compiler", "types"]
@@ -1038,7 +1053,7 @@ project-exploit-mitigations = [
 "/src/librustdoc" =                                      ["rustdoc"]
 "/src/llvm-project" =                                    ["@cuviper"]
 "/src/rustdoc-json-types" =                              ["rustdoc"]
-"/src/stage0.json" =                                     ["bootstrap"]
+"/src/stage0" =                                          ["bootstrap"]
 "/tests/run-make" =                                      ["@jieyouxu"]
 "/tests/ui" =                                            ["compiler"]
 "/src/tools/cargo" =                                     ["@ehuss"]
@@ -1057,3 +1072,7 @@ project-exploit-mitigations = [
 # Enable tracking of PR review assignment
 # Documentation at: https://forge.rust-lang.org/triagebot/pr-assignment-tracking.html
 [pr-tracking]
+
+# Enable issue transfers within the org
+# Documentation at: https://forge.rust-lang.org/triagebot/transfer.html
+[transfer]

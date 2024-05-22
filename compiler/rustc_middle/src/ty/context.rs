@@ -4,6 +4,8 @@
 
 pub mod tls;
 
+pub use rustc_type_ir::lift::Lift;
+
 use crate::arena::Arena;
 use crate::dep_graph::{DepGraph, DepKindStruct};
 use crate::infer::canonical::{CanonicalParamEnvCache, CanonicalVarInfo, CanonicalVarInfos};
@@ -24,12 +26,12 @@ use crate::traits::solve;
 use crate::traits::solve::{
     ExternalConstraints, ExternalConstraintsData, PredefinedOpaques, PredefinedOpaquesData,
 };
+use crate::ty::predicate::ExistentialPredicateStableCmpExt as _;
 use crate::ty::{
     self, AdtDef, AdtDefData, AdtKind, Binder, Clause, Clauses, Const, ConstData,
     GenericParamDefKind, ImplPolarity, List, ListWithCachedTypeInfo, ParamConst, ParamTy, Pattern,
     PatternKind, PolyExistentialPredicate, PolyFnSig, Predicate, PredicateKind, PredicatePolarity,
-    Region, RegionKind, ReprOptions, TraitObjectVisitor, Ty, TyKind, TyVid, TypeVisitable,
-    Visibility,
+    Region, RegionKind, ReprOptions, TraitObjectVisitor, Ty, TyKind, TyVid, Visibility,
 };
 use crate::ty::{GenericArg, GenericArgs, GenericArgsRef};
 use rustc_ast::{self as ast, attr};
@@ -73,6 +75,7 @@ use rustc_type_ir::TyKind::*;
 use rustc_type_ir::WithCachedTypeInfo;
 use rustc_type_ir::{CollectAndApply, Interner, TypeFlags};
 
+use std::assert_matches::assert_matches;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
@@ -85,21 +88,25 @@ use std::ops::{Bound, Deref};
 #[allow(rustc::usage_of_ty_tykind)]
 impl<'tcx> Interner for TyCtxt<'tcx> {
     type DefId = DefId;
-    type DefiningOpaqueTypes = &'tcx ty::List<LocalDefId>;
     type AdtDef = ty::AdtDef<'tcx>;
+
     type GenericArgs = ty::GenericArgsRef<'tcx>;
+    type OwnItemArgs = &'tcx [ty::GenericArg<'tcx>];
     type GenericArg = ty::GenericArg<'tcx>;
     type Term = ty::Term<'tcx>;
 
-    type Binder<T: TypeVisitable<TyCtxt<'tcx>>> = Binder<'tcx, T>;
-    type BoundVars = &'tcx List<ty::BoundVariableKind>;
-    type BoundVar = ty::BoundVariableKind;
+    type BoundVarKinds = &'tcx List<ty::BoundVariableKind>;
+    type BoundVarKind = ty::BoundVariableKind;
+
     type CanonicalVars = CanonicalVarInfos<'tcx>;
+    type PredefinedOpaques = solve::PredefinedOpaques<'tcx>;
+    type DefiningOpaqueTypes = &'tcx ty::List<LocalDefId>;
+    type ExternalConstraints = ExternalConstraints<'tcx>;
+    type GoalEvaluationSteps = &'tcx [solve::inspect::GoalEvaluationStep<TyCtxt<'tcx>>];
 
     type Ty = Ty<'tcx>;
-    type Pat = Pattern<'tcx>;
     type Tys = &'tcx List<Ty<'tcx>>;
-    type AliasTy = ty::AliasTy<'tcx>;
+    type FnInputTys = &'tcx [Ty<'tcx>];
     type ParamTy = ParamTy;
     type BoundTy = ty::BoundTy;
     type PlaceholderTy = ty::PlaceholderType;
@@ -109,8 +116,11 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type PolyFnSig = PolyFnSig<'tcx>;
     type AllocId = crate::mir::interpret::AllocId;
 
+    type Pat = Pattern<'tcx>;
+    type Safety = hir::Safety;
+    type Abi = abi::Abi;
+
     type Const = ty::Const<'tcx>;
-    type AliasConst = ty::UnevaluatedConst<'tcx>;
     type PlaceholderConst = ty::PlaceholderConst;
     type ParamConst = ty::ParamConst;
     type BoundConst = ty::BoundVar;
@@ -119,24 +129,117 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
 
     type Region = Region<'tcx>;
     type EarlyParamRegion = ty::EarlyParamRegion;
-    type BoundRegion = ty::BoundRegion;
     type LateParamRegion = ty::LateParamRegion;
-    type InferRegion = ty::RegionVid;
+    type BoundRegion = ty::BoundRegion;
     type PlaceholderRegion = ty::PlaceholderRegion;
 
+    type ParamEnv = ty::ParamEnv<'tcx>;
     type Predicate = Predicate<'tcx>;
-    type TraitPredicate = ty::TraitPredicate<'tcx>;
-    type RegionOutlivesPredicate = ty::RegionOutlivesPredicate<'tcx>;
-    type TypeOutlivesPredicate = ty::TypeOutlivesPredicate<'tcx>;
-    type ProjectionPredicate = ty::ProjectionPredicate<'tcx>;
-    type NormalizesTo = ty::NormalizesTo<'tcx>;
-    type SubtypePredicate = ty::SubtypePredicate<'tcx>;
-    type CoercePredicate = ty::CoercePredicate<'tcx>;
-    type ClosureKind = ty::ClosureKind;
+    type Clause = Clause<'tcx>;
+
     type Clauses = ty::Clauses<'tcx>;
 
     fn mk_canonical_var_infos(self, infos: &[ty::CanonicalVarInfo<Self>]) -> Self::CanonicalVars {
         self.mk_canonical_var_infos(infos)
+    }
+
+    type GenericsOf = &'tcx ty::Generics;
+
+    fn generics_of(self, def_id: DefId) -> &'tcx ty::Generics {
+        self.generics_of(def_id)
+    }
+
+    fn type_of_instantiated(self, def_id: DefId, args: ty::GenericArgsRef<'tcx>) -> Ty<'tcx> {
+        self.type_of(def_id).instantiate(self, args)
+    }
+
+    fn alias_ty_kind(self, alias: ty::AliasTy<'tcx>) -> ty::AliasTyKind {
+        match self.def_kind(alias.def_id) {
+            DefKind::AssocTy => {
+                if let DefKind::Impl { of_trait: false } = self.def_kind(self.parent(alias.def_id))
+                {
+                    ty::Inherent
+                } else {
+                    ty::Projection
+                }
+            }
+            DefKind::OpaqueTy => ty::Opaque,
+            DefKind::TyAlias => ty::Weak,
+            kind => bug!("unexpected DefKind in AliasTy: {kind:?}"),
+        }
+    }
+
+    fn alias_term_kind(self, alias: ty::AliasTerm<'tcx>) -> ty::AliasTermKind {
+        match self.def_kind(alias.def_id) {
+            DefKind::AssocTy => {
+                if let DefKind::Impl { of_trait: false } = self.def_kind(self.parent(alias.def_id))
+                {
+                    ty::AliasTermKind::InherentTy
+                } else {
+                    ty::AliasTermKind::ProjectionTy
+                }
+            }
+            DefKind::OpaqueTy => ty::AliasTermKind::OpaqueTy,
+            DefKind::TyAlias => ty::AliasTermKind::WeakTy,
+            DefKind::AssocConst => ty::AliasTermKind::ProjectionConst,
+            DefKind::AnonConst => ty::AliasTermKind::UnevaluatedConst,
+            kind => bug!("unexpected DefKind in AliasTy: {kind:?}"),
+        }
+    }
+
+    fn trait_ref_and_own_args_for_alias(
+        self,
+        def_id: Self::DefId,
+        args: Self::GenericArgs,
+    ) -> (rustc_type_ir::TraitRef<Self>, Self::OwnItemArgs) {
+        assert_matches!(self.def_kind(def_id), DefKind::AssocTy | DefKind::AssocConst);
+        let trait_def_id = self.parent(def_id);
+        assert_matches!(self.def_kind(trait_def_id), DefKind::Trait);
+        let trait_generics = self.generics_of(trait_def_id);
+        (
+            ty::TraitRef::new(self, trait_def_id, args.truncate_to(self, trait_generics)),
+            &args[trait_generics.count()..],
+        )
+    }
+
+    fn mk_args(self, args: &[Self::GenericArg]) -> Self::GenericArgs {
+        self.mk_args(args)
+    }
+
+    fn mk_args_from_iter(self, args: impl Iterator<Item = Self::GenericArg>) -> Self::GenericArgs {
+        self.mk_args_from_iter(args)
+    }
+
+    fn check_and_mk_args(
+        self,
+        def_id: DefId,
+        args: impl IntoIterator<Item: Into<ty::GenericArg<'tcx>>>,
+    ) -> ty::GenericArgsRef<'tcx> {
+        self.check_and_mk_args(def_id, args)
+    }
+
+    fn parent(self, def_id: Self::DefId) -> Self::DefId {
+        self.parent(def_id)
+    }
+
+    fn recursion_limit(self) -> usize {
+        self.recursion_limit().0
+    }
+}
+
+impl<'tcx> rustc_type_ir::inherent::Abi<TyCtxt<'tcx>> for abi::Abi {
+    fn is_rust(self) -> bool {
+        matches!(self, abi::Abi::Rust)
+    }
+}
+
+impl<'tcx> rustc_type_ir::inherent::Safety<TyCtxt<'tcx>> for hir::Safety {
+    fn is_safe(self) -> bool {
+        matches!(self, hir::Safety::Safe)
+    }
+
+    fn prefix_str(self) -> &'static str {
+        self.prefix_str()
     }
 }
 
@@ -917,7 +1020,7 @@ impl<'tcx> TyCtxt<'tcx> {
         )
     }
 
-    pub fn lift<T: Lift<'tcx>>(self, value: T) -> Option<T::Lifted> {
+    pub fn lift<T: Lift<TyCtxt<'tcx>>>(self, value: T) -> Option<T::Lifted> {
         value.lift_to_tcx(self)
     }
 
@@ -1524,31 +1627,9 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 }
 
-/// A trait implemented for all `X<'a>` types that can be safely and
-/// efficiently converted to `X<'tcx>` as long as they are part of the
-/// provided `TyCtxt<'tcx>`.
-/// This can be done, for example, for `Ty<'tcx>` or `GenericArgsRef<'tcx>`
-/// by looking them up in their respective interners.
-///
-/// However, this is still not the best implementation as it does
-/// need to compare the components, even for interned values.
-/// It would be more efficient if `TypedArena` provided a way to
-/// determine whether the address is in the allocated range.
-///
-/// `None` is returned if the value or one of the components is not part
-/// of the provided context.
-/// For `Ty`, `None` can be returned if either the type interner doesn't
-/// contain the `TyKind` key or if the address of the interned
-/// pointer differs. The latter case is possible if a primitive type,
-/// e.g., `()` or `u8`, was interned in a different context.
-pub trait Lift<'tcx>: fmt::Debug {
-    type Lifted: fmt::Debug + 'tcx;
-    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted>;
-}
-
 macro_rules! nop_lift {
     ($set:ident; $ty:ty => $lifted:ty) => {
-        impl<'a, 'tcx> Lift<'tcx> for $ty {
+        impl<'a, 'tcx> Lift<TyCtxt<'tcx>> for $ty {
             type Lifted = $lifted;
             fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
                 // Assert that the set has the right type.
@@ -1583,7 +1664,7 @@ macro_rules! nop_lift {
 
 macro_rules! nop_list_lift {
     ($set:ident; $ty:ty => $lifted:ty) => {
-        impl<'a, 'tcx> Lift<'tcx> for &'a List<$ty> {
+        impl<'a, 'tcx> Lift<TyCtxt<'tcx>> for &'a List<$ty> {
             type Lifted = &'tcx List<$lifted>;
             fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
                 // Assert that the set has the right type.
@@ -1621,7 +1702,7 @@ nop_list_lift! {args; GenericArg<'a> => GenericArg<'tcx>}
 
 macro_rules! nop_slice_lift {
     ($ty:ty => $lifted:ty) => {
-        impl<'a, 'tcx> Lift<'tcx> for &'a [$ty] {
+        impl<'a, 'tcx> Lift<TyCtxt<'tcx>> for &'a [$ty] {
             type Lifted = &'tcx [$lifted];
             fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
                 if self.is_empty() {
@@ -1945,11 +2026,8 @@ impl<'tcx> TyCtxt<'tcx> {
     /// that is, a `fn` type that is equivalent in every way for being
     /// unsafe.
     pub fn safe_to_unsafe_fn_ty(self, sig: PolyFnSig<'tcx>) -> Ty<'tcx> {
-        assert_eq!(sig.unsafety(), hir::Unsafety::Normal);
-        Ty::new_fn_ptr(
-            self,
-            sig.map_bound(|sig| ty::FnSig { unsafety: hir::Unsafety::Unsafe, ..sig }),
-        )
+        assert_eq!(sig.safety(), hir::Safety::Safe);
+        Ty::new_fn_ptr(self, sig.map_bound(|sig| ty::FnSig { safety: hir::Safety::Unsafe, ..sig }))
     }
 
     /// Given the def_id of a Trait `trait_def_id` and the name of an associated item `assoc_name`
@@ -2006,20 +2084,16 @@ impl<'tcx> TyCtxt<'tcx> {
     /// and so forth -- so e.g., if we have a sig with `Fn<(u32, i32)>` then
     /// you would get a `fn(u32, i32)`.
     /// `unsafety` determines the unsafety of the fn signature. If you pass
-    /// `hir::Unsafety::Unsafe` in the previous example, then you would get
+    /// `hir::Safety::Unsafe` in the previous example, then you would get
     /// an `unsafe fn (u32, i32)`.
     /// It cannot convert a closure that requires unsafe.
-    pub fn signature_unclosure(
-        self,
-        sig: PolyFnSig<'tcx>,
-        unsafety: hir::Unsafety,
-    ) -> PolyFnSig<'tcx> {
+    pub fn signature_unclosure(self, sig: PolyFnSig<'tcx>, safety: hir::Safety) -> PolyFnSig<'tcx> {
         sig.map_bound(|s| {
             let params = match s.inputs()[0].kind() {
                 ty::Tuple(params) => *params,
                 _ => bug!(),
             };
-            self.mk_fn_sig(params, s.output(), s.c_variadic, unsafety, abi::Abi::Rust)
+            self.mk_fn_sig(params, s.output(), s.c_variadic, safety, abi::Abi::Rust)
         })
     }
 
@@ -2060,7 +2134,7 @@ impl<'tcx> TyCtxt<'tcx> {
             && let DefKind::AssocTy = self.def_kind(def_id)
             && let DefKind::Impl { of_trait: false } = self.def_kind(self.parent(def_id))
         {
-            if generics.params.len() + 1 != args.len() {
+            if generics.own_params.len() + 1 != args.len() {
                 return false;
             }
 
@@ -2085,7 +2159,7 @@ impl<'tcx> TyCtxt<'tcx> {
             own_args
         };
 
-        for (param, arg) in std::iter::zip(&generics.params, own_args) {
+        for (param, arg) in std::iter::zip(&generics.own_params, own_args) {
             match (&param.kind, arg.unpack()) {
                 (ty::GenericParamDefKind::Type { .. }, ty::GenericArgKind::Type(_))
                 | (ty::GenericParamDefKind::Lifetime, ty::GenericArgKind::Lifetime(_))
@@ -2286,7 +2360,7 @@ impl<'tcx> TyCtxt<'tcx> {
         inputs: I,
         output: I::Item,
         c_variadic: bool,
-        unsafety: hir::Unsafety,
+        safety: hir::Safety,
         abi: abi::Abi,
     ) -> T::Output
     where
@@ -2296,7 +2370,7 @@ impl<'tcx> TyCtxt<'tcx> {
         T::collect_and_apply(inputs.into_iter().chain(iter::once(output)), |xs| ty::FnSig {
             inputs_and_output: self.mk_type_list(xs),
             c_variadic,
-            unsafety,
+            safety,
             abi,
         })
     }
@@ -2331,7 +2405,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn mk_args_from_iter<I, T>(self, iter: I) -> T::Output
     where
         I: Iterator<Item = T>,
-        T: CollectAndApply<GenericArg<'tcx>, &'tcx List<GenericArg<'tcx>>>,
+        T: CollectAndApply<GenericArg<'tcx>, ty::GenericArgsRef<'tcx>>,
     {
         T::collect_and_apply(iter, |xs| self.mk_args(xs))
     }
@@ -2449,7 +2523,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     span,
                     msg,
                     format!("#![feature({feature})]\n"),
-                    Applicability::MachineApplicable,
+                    Applicability::MaybeIncorrect,
                 );
             } else {
                 diag.help(msg);

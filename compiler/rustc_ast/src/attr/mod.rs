@@ -13,6 +13,7 @@ use crate::util::literal::escape_string_symbol;
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_span::symbol::{sym, Ident, Symbol};
 use rustc_span::Span;
+use smallvec::{smallvec, SmallVec};
 use std::iter;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thin_vec::{thin_vec, ThinVec};
@@ -87,8 +88,18 @@ impl Attribute {
             AttrKind::DocComment(..) => None,
         }
     }
+
     pub fn name_or_empty(&self) -> Symbol {
         self.ident().unwrap_or_else(Ident::empty).name
+    }
+
+    pub fn path(&self) -> SmallVec<[Symbol; 1]> {
+        match &self.kind {
+            AttrKind::Normal(normal) => {
+                normal.item.path.segments.iter().map(|s| s.ident.name).collect()
+            }
+            AttrKind::DocComment(..) => smallvec![sym::doc],
+        }
     }
 
     #[inline]
@@ -345,7 +356,7 @@ impl MetaItem {
                 let span = span.with_hi(segments.last().unwrap().ident.span.hi());
                 Path { span, segments, tokens: None }
             }
-            Some(TokenTree::Token(Token { kind: token::Interpolated(nt), .. }, _)) => match &nt.0 {
+            Some(TokenTree::Token(Token { kind: token::Interpolated(nt), .. }, _)) => match &**nt {
                 token::Nonterminal::NtMeta(item) => return item.meta(item.path.span),
                 token::Nonterminal::NtPath(path) => (**path).clone(),
                 _ => return None,

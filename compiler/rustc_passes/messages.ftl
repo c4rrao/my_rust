@@ -52,15 +52,15 @@ passes_attr_only_in_functions =
 passes_both_ffi_const_and_pure =
     `#[ffi_const]` function cannot be `#[ffi_pure]`
 
-passes_break_inside_async_block =
-    `{$name}` inside of an `async` block
-    .label = cannot `{$name}` inside of an `async` block
-    .async_block_label = enclosing `async` block
-
 passes_break_inside_closure =
     `{$name}` inside of a closure
     .label = cannot `{$name}` inside of a closure
     .closure_label = enclosing closure
+
+passes_break_inside_coroutine =
+    `{$name}` inside `{$kind}` {$source}
+    .label = cannot `{$name}` inside `{$kind}` {$source}
+    .coroutine_label = enclosing `{$kind}` {$source}
 
 passes_break_non_loop =
     `break` with value from a `{$kind}` loop
@@ -341,7 +341,7 @@ passes_implied_feature_not_exist =
     feature `{$implied_by}` implying `{$feature}` does not exist
 
 passes_incorrect_do_not_recommend_location =
-    `#[do_not_recommend]` can only be placed on trait implementations
+    `#[diagnostic::do_not_recommend]` can only be placed on trait implementations
 
 passes_incorrect_meta_item = expected a quoted string literal
 passes_incorrect_meta_item_suggestion = consider surrounding this with quotes

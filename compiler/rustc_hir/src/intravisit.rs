@@ -533,7 +533,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) -> V::
             try_visit!(visitor.visit_id(item.hir_id()));
             try_visit!(walk_generics(visitor, generics));
             walk_list!(visitor, visit_param_bound, bounds);
-            if let Some(precise_capturing_args) = precise_capturing_args {
+            if let Some((precise_capturing_args, _)) = precise_capturing_args {
                 for arg in precise_capturing_args {
                     try_visit!(visitor.visit_precise_capturing_arg(arg));
                 }
@@ -545,7 +545,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) -> V::
             try_visit!(visitor.visit_enum_def(enum_definition, item.hir_id()));
         }
         ItemKind::Impl(Impl {
-            unsafety: _,
+            safety: _,
             defaultness: _,
             polarity: _,
             defaultness_span: _,
@@ -768,7 +768,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) 
         ExprKind::DropTemps(ref subexpression) => {
             try_visit!(visitor.visit_expr(subexpression));
         }
-        ExprKind::Let(LetExpr { span: _, pat, ty, init, is_recovered: _ }) => {
+        ExprKind::Let(LetExpr { span: _, pat, ty, init, recovered: _ }) => {
             // match the visit order in walk_local
             try_visit!(visitor.visit_expr(init));
             try_visit!(visitor.visit_pat(pat));

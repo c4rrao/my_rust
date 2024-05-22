@@ -4,6 +4,7 @@ use crate::errors::*;
 use rustc_errors::DiagArgValue;
 use rustc_hir::{self as hir, BindingMode, ByRef, HirId, Mutability};
 use rustc_middle::mir::BorrowKind;
+use rustc_middle::span_bug;
 use rustc_middle::thir::visit::Visitor;
 use rustc_middle::thir::*;
 use rustc_middle::ty::print::with_no_trimmed_paths;
@@ -390,7 +391,7 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 return; // don't visit the whole expression
             }
             ExprKind::Call { fun, ty: _, args: _, from_hir_call: _, fn_span: _ } => {
-                if self.thir[fun].ty.fn_sig(self.tcx).unsafety() == hir::Unsafety::Unsafe {
+                if self.thir[fun].ty.fn_sig(self.tcx).safety() == hir::Safety::Unsafe {
                     let func_id = if let ty::FnDef(func_id, _) = self.thir[fun].ty.kind() {
                         Some(*func_id)
                     } else {
@@ -920,7 +921,7 @@ pub fn check_unsafety(tcx: TyCtxt<'_>, def: LocalDefId) {
 
     let hir_id = tcx.local_def_id_to_hir_id(def);
     let safety_context = tcx.hir().fn_sig_by_hir_id(hir_id).map_or(SafetyContext::Safe, |fn_sig| {
-        if fn_sig.header.unsafety == hir::Unsafety::Unsafe {
+        if fn_sig.header.safety == hir::Safety::Unsafe {
             SafetyContext::UnsafeFn
         } else {
             SafetyContext::Safe

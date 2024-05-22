@@ -12,6 +12,8 @@
 #![feature(let_chains)]
 #![feature(lint_reasons)]
 #![feature(trait_upcasting)]
+#![feature(strict_overflow_ops)]
+#![feature(strict_provenance)]
 // Configure clippy and other lints
 #![allow(
     clippy::collapsible_else_if,
@@ -73,12 +75,14 @@ extern crate rustc_target;
 extern crate rustc_driver;
 
 mod alloc_addresses;
+mod alloc_bytes;
 mod borrow_tracker;
 mod clock;
 mod concurrency;
 mod diagnostics;
 mod eval;
 mod helpers;
+mod intrinsics;
 mod machine;
 mod mono_hash_map;
 mod operator;
@@ -95,16 +99,17 @@ pub use rustc_const_eval::interpret::*;
 #[doc(no_inline)]
 pub use rustc_const_eval::interpret::{self, AllocMap, PlaceTy, Provenance as _};
 
-pub use crate::shims::EmulateItemResult;
+pub use crate::intrinsics::EvalContextExt as _;
 pub use crate::shims::env::{EnvVars, EvalContextExt as _};
 pub use crate::shims::foreign_items::{DynSym, EvalContextExt as _};
-pub use crate::shims::intrinsics::EvalContextExt as _;
 pub use crate::shims::os_str::EvalContextExt as _;
 pub use crate::shims::panic::{CatchUnwindData, EvalContextExt as _};
 pub use crate::shims::time::EvalContextExt as _;
 pub use crate::shims::tls::TlsData;
+pub use crate::shims::EmulateItemResult;
 
 pub use crate::alloc_addresses::{EvalContextExt as _, ProvenanceMode};
+pub use crate::alloc_bytes::MiriAllocBytes;
 pub use crate::borrow_tracker::stacked_borrows::{
     EvalContextExt as _, Item, Permission, Stack, Stacks,
 };

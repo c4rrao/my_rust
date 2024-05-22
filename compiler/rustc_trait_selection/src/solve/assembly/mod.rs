@@ -1,9 +1,9 @@
 //! Code shared by trait and projection goals for candidate assembly.
 
-use crate::solve::GoalSource;
-use crate::solve::{inspect, EvalCtxt, SolverMode};
 use rustc_hir::def_id::DefId;
+use rustc_infer::infer::InferCtxt;
 use rustc_infer::traits::query::NoSolution;
+use rustc_middle::bug;
 use rustc_middle::traits::solve::inspect::ProbeKind;
 use rustc_middle::traits::solve::{
     CandidateSource, CanonicalResponse, Certainty, Goal, MaybeCause, QueryResult,
@@ -12,10 +12,12 @@ use rustc_middle::traits::BuiltinImplSource;
 use rustc_middle::ty::fast_reject::{SimplifiedType, TreatParams};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::ty::{fast_reject, TypeFoldable};
-use rustc_middle::ty::{ToPredicate, TypeVisitableExt};
+use rustc_middle::ty::{TypeVisitableExt, Upcast};
 use rustc_span::{ErrorGuaranteed, DUMMY_SP};
 use std::fmt::Debug;
-use std::mem;
+
+use crate::solve::GoalSource;
+use crate::solve::{EvalCtxt, SolverMode};
 
 pub(super) mod structural_traits;
 
@@ -25,7 +27,7 @@ pub(super) mod structural_traits;
 /// and the `result` when using the given `source`.
 #[derive(Debug, Clone)]
 pub(super) struct Candidate<'tcx> {
-    pub(super) source: CandidateSource,
+    pub(super) source: CandidateSource<'tcx>,
     pub(super) result: CanonicalResponse<'tcx>,
 }
 
@@ -46,19 +48,19 @@ pub(super) trait GoalKind<'tcx>:
     /// work, then produce a response (typically by executing
     /// [`EvalCtxt::evaluate_added_goals_and_make_canonical_response`]).
     fn probe_and_match_goal_against_assumption(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
-        source: CandidateSource,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
+        source: CandidateSource<'tcx>,
         goal: Goal<'tcx, Self>,
         assumption: ty::Clause<'tcx>,
-        then: impl FnOnce(&mut EvalCtxt<'_, 'tcx>) -> QueryResult<'tcx>,
+        then: impl FnOnce(&mut EvalCtxt<'_, InferCtxt<'tcx>>) -> QueryResult<'tcx>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// Consider a clause, which consists of a "assumption" and some "requirements",
     /// to satisfy a goal. If the requirements hold, then attempt to satisfy our
     /// goal by equating it with the assumption.
     fn probe_and_consider_implied_clause(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
-        parent_source: CandidateSource,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
+        parent_source: CandidateSource<'tcx>,
         goal: Goal<'tcx, Self>,
         assumption: ty::Clause<'tcx>,
         requirements: impl IntoIterator<Item = (GoalSource, Goal<'tcx, ty::Predicate<'tcx>>)>,
@@ -75,8 +77,8 @@ pub(super) trait GoalKind<'tcx>:
     /// additionally checking all of the supertraits and object bounds to hold,
     /// since they're not implied by the well-formedness of the object type.
     fn probe_and_consider_object_bound_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
-        source: CandidateSource,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
+        source: CandidateSource<'tcx>,
         goal: Goal<'tcx, Self>,
         assumption: ty::Clause<'tcx>,
     ) -> Result<Candidate<'tcx>, NoSolution> {
@@ -99,7 +101,7 @@ pub(super) trait GoalKind<'tcx>:
     }
 
     fn consider_impl_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
         impl_def_id: DefId,
     ) -> Result<Candidate<'tcx>, NoSolution>;
@@ -111,7 +113,7 @@ pub(super) trait GoalKind<'tcx>:
     /// Trait goals always hold while projection goals never do. This is a bit arbitrary
     /// but prevents incorrect normalization while hiding any trait errors.
     fn consider_error_guaranteed_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         guar: ErrorGuaranteed,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -120,13 +122,13 @@ pub(super) trait GoalKind<'tcx>:
     /// These components are given by built-in rules from
     /// [`structural_traits::instantiate_constituent_tys_for_auto_trait`].
     fn consider_auto_trait_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// A trait alias holds if the RHS traits and `where` clauses hold.
     fn consider_trait_alias_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -135,7 +137,7 @@ pub(super) trait GoalKind<'tcx>:
     /// These components are given by built-in rules from
     /// [`structural_traits::instantiate_constituent_tys_for_sized_trait`].
     fn consider_builtin_sized_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -144,27 +146,27 @@ pub(super) trait GoalKind<'tcx>:
     /// These components are given by built-in rules from
     /// [`structural_traits::instantiate_constituent_tys_for_copy_clone_trait`].
     fn consider_builtin_copy_clone_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// A type is `PointerLike` if we can compute its layout, and that layout
     /// matches the layout of `usize`.
     fn consider_builtin_pointer_like_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// A type is a `FnPtr` if it is of `FnPtr` type.
     fn consider_builtin_fn_ptr_trait_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// A callable type (a closure, fn def, or fn ptr) is known to implement the `Fn<A>`
     /// family of traits where `A` is given by the signature of the type.
     fn consider_builtin_fn_trait_candidates(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
         kind: ty::ClosureKind,
     ) -> Result<Candidate<'tcx>, NoSolution>;
@@ -172,7 +174,7 @@ pub(super) trait GoalKind<'tcx>:
     /// An async closure is known to implement the `AsyncFn<A>` family of traits
     /// where `A` is given by the signature of the type.
     fn consider_builtin_async_fn_trait_candidates(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
         kind: ty::ClosureKind,
     ) -> Result<Candidate<'tcx>, NoSolution>;
@@ -181,13 +183,13 @@ pub(super) trait GoalKind<'tcx>:
     /// is used internally to delay computation for async closures until after
     /// upvar analysis is performed in HIR typeck.
     fn consider_builtin_async_fn_kind_helper_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// `Tuple` is implemented if the `Self` type is a tuple.
     fn consider_builtin_tuple_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -197,7 +199,7 @@ pub(super) trait GoalKind<'tcx>:
     /// the built-in types. For structs, the metadata type is given by the struct
     /// tail.
     fn consider_builtin_pointee_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -205,7 +207,7 @@ pub(super) trait GoalKind<'tcx>:
     /// `Future<Output = O>`, where `O` is given by the coroutine's return type
     /// that was computed during type-checking.
     fn consider_builtin_future_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -213,19 +215,19 @@ pub(super) trait GoalKind<'tcx>:
     /// `Iterator<Item = O>`, where `O` is given by the generator's yield type
     /// that was computed during type-checking.
     fn consider_builtin_iterator_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     /// A coroutine (that comes from a `gen` desugaring) is known to implement
     /// `FusedIterator`
     fn consider_builtin_fused_iterator_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     fn consider_builtin_async_iterator_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -233,27 +235,27 @@ pub(super) trait GoalKind<'tcx>:
     /// implement `Coroutine<R, Yield = Y, Return = O>`, given the resume, yield,
     /// and return types of the coroutine computed during type-checking.
     fn consider_builtin_coroutine_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     fn consider_builtin_discriminant_kind_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     fn consider_builtin_async_destruct_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     fn consider_builtin_destruct_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
     fn consider_builtin_transmute_candidate(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Result<Candidate<'tcx>, NoSolution>;
 
@@ -265,12 +267,12 @@ pub(super) trait GoalKind<'tcx>:
     /// otherwise recompute this for codegen. This is a bit of a mess but the
     /// easiest way to maintain the existing behavior for now.
     fn consider_structural_builtin_unsize_candidates(
-        ecx: &mut EvalCtxt<'_, 'tcx>,
+        ecx: &mut EvalCtxt<'_, InferCtxt<'tcx>>,
         goal: Goal<'tcx, Self>,
     ) -> Vec<Candidate<'tcx>>;
 }
 
-impl<'tcx> EvalCtxt<'_, 'tcx> {
+impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
     pub(super) fn assemble_and_evaluate_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -286,7 +288,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             return self.forced_ambiguity(MaybeCause::Ambiguity).into_iter().collect();
         }
 
-        let goal =
+        let goal: Goal<'tcx, G> =
             goal.with(self.tcx(), goal.predicate.with_self_ty(self.tcx(), normalized_self_ty));
         // Vars that show up in the rest of the goal substs may have been constrained by
         // normalizing the self type as well, since type variables are not uniquified.
@@ -331,7 +333,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             .enter(|this| this.evaluate_added_goals_and_make_canonical_response(certainty))
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_non_blanket_impl_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -447,7 +449,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_blanket_impl_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -470,7 +472,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_builtin_impl_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -544,7 +546,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_param_env_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -561,7 +563,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_alias_bound_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -665,7 +667,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_object_bound_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -744,7 +746,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
                     ecx,
                     CandidateSource::BuiltinImpl(BuiltinImplSource::Object { vtable_base }),
                     goal,
-                    assumption.to_predicate(tcx),
+                    assumption.upcast(tcx),
                 ));
             });
         }
@@ -756,7 +758,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
     ///
     /// To do so we add an ambiguous candidate in case such an unknown impl could
     /// apply to the current goal.
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
     fn assemble_coherence_unknowable_candidates<G: GoalKind<'tcx>>(
         &mut self,
         goal: Goal<'tcx, G>,
@@ -791,17 +793,16 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         goal: Goal<'tcx, G>,
         candidates: &mut Vec<Candidate<'tcx>>,
     ) {
-        // HACK: We temporarily remove the `ProofTreeBuilder` to
-        // avoid adding `Trait` candidates to the candidates used
-        // to prove the current goal.
-        let inspect = mem::replace(&mut self.inspect, inspect::ProofTreeBuilder::new_noop());
-
         let tcx = self.tcx();
         let trait_goal: Goal<'tcx, ty::TraitPredicate<'tcx>> =
             goal.with(tcx, goal.predicate.trait_ref(tcx));
-        let mut trait_candidates_from_env = Vec::new();
-        self.assemble_param_env_candidates(trait_goal, &mut trait_candidates_from_env);
-        self.assemble_alias_bound_candidates(trait_goal, &mut trait_candidates_from_env);
+
+        let mut trait_candidates_from_env = vec![];
+        self.probe(|_| ProbeKind::ShadowedEnvProbing).enter(|ecx| {
+            ecx.assemble_param_env_candidates(trait_goal, &mut trait_candidates_from_env);
+            ecx.assemble_alias_bound_candidates(trait_goal, &mut trait_candidates_from_env);
+        });
+
         if !trait_candidates_from_env.is_empty() {
             let trait_env_result = self.merge_candidates(trait_candidates_from_env);
             match trait_env_result.unwrap().value.certainty {
@@ -830,7 +831,6 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
                 }
             }
         }
-        self.inspect = inspect;
     }
 
     /// If there are multiple ways to prove a trait or projection goal, we have

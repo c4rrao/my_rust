@@ -11,7 +11,7 @@
 //! calls to munmap, but for a very different reason. In principle, according to the man pages, it
 //! is possible to unmap arbitrary regions of address space. But in a high-level language like Rust
 //! this amounts to partial deallocation, which LLVM does not support. So any attempt to call our
-//! munmap shim which would partily unmap a region of address space previously mapped by mmap will
+//! munmap shim which would partially unmap a region of address space previously mapped by mmap will
 //! report UB.
 
 use crate::*;
@@ -42,9 +42,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let map_shared = this.eval_libc_i32("MAP_SHARED");
         let map_fixed = this.eval_libc_i32("MAP_FIXED");
 
-        // This is a horrible hack, but on MacOS the guard page mechanism uses mmap
+        // This is a horrible hack, but on MacOS and Solaris the guard page mechanism uses mmap
         // in a way we do not support. We just give it the return value it expects.
-        if this.frame_in_std() && this.tcx.sess.target.os == "macos" && (flags & map_fixed) != 0 {
+        if this.frame_in_std()
+            && matches!(&*this.tcx.sess.target.os, "macos" | "solaris")
+            && (flags & map_fixed) != 0
+        {
             return Ok(Scalar::from_maybe_pointer(Pointer::from_addr_invalid(addr), this));
         }
 
@@ -75,7 +78,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         // * The implementation does not support the combination of accesses requested in the
         // prot argument.
         //
-        // Miri doesn't support MAP_FIXED or any any protections other than PROT_READ|PROT_WRITE.
+        // Miri doesn't support MAP_FIXED or any protections other than PROT_READ|PROT_WRITE.
         if flags & map_fixed != 0 || prot != prot_read | prot_write {
             this.set_last_error(this.eval_libc("ENOTSUP"))?;
             return Ok(this.eval_libc("MAP_FAILED"));

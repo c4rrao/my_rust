@@ -30,13 +30,12 @@ use rustc_target::abi::{Align, Size};
 use rustc_target::spec::abi::Abi;
 
 use crate::{
-    concurrency::{data_race, weak_memory},
-    shims::unix,
+    concurrency::{
+        data_race::{self, NaReadType, NaWriteType},
+        weak_memory,
+    },
     *,
 };
-
-use self::concurrency::data_race::NaReadType;
-use self::concurrency::data_race::NaWriteType;
 
 /// First real-time signal.
 /// `signal(7)` says this must be between 32 and 64 and specifies 34 or 35
@@ -206,11 +205,11 @@ pub enum Provenance {
     /// whether *some* exposed pointer could have done what we want to do, and if the answer is yes
     /// then we allow the access. This allows too much code in two ways:
     /// - The same wildcard pointer can "take the role" of multiple different exposed pointers on
-    ///   subsequenct memory accesses.
+    ///   subsequent memory accesses.
     /// - In the aliasing model, we don't just have to know the borrow tag of the pointer used for
     ///   the access, we also have to update the aliasing state -- and that update can be very
     ///   different depending on which borrow tag we pick! Stacked Borrows has support for this by
-    ///   switching to a stack that is only approximately known, i.e. we overapproximate the effect
+    ///   switching to a stack that is only approximately known, i.e. we over-approximate the effect
     ///   of using *any* exposed pointer for this access, and only keep information about the borrow
     ///   stack that would be true with all possible choices.
     Wildcard,
@@ -464,9 +463,9 @@ pub struct MiriMachine<'mir, 'tcx> {
     pub(crate) validate: bool,
 
     /// The table of file descriptors.
-    pub(crate) fds: unix::FdTable,
+    pub(crate) fds: shims::FdTable,
     /// The table of directory descriptors.
-    pub(crate) dirs: unix::DirTable,
+    pub(crate) dirs: shims::DirTable,
 
     /// This machine's monotone clock.
     pub(crate) clock: Clock,
@@ -535,11 +534,11 @@ pub struct MiriMachine<'mir, 'tcx> {
     // The total number of blocks that have been executed.
     pub(crate) basic_block_count: u64,
 
-    /// Handle of the optional shared object file for external functions.
+    /// Handle of the optional shared object file for native functions.
     #[cfg(target_os = "linux")]
-    pub external_so_lib: Option<(libloading::Library, std::path::PathBuf)>,
+    pub native_lib: Option<(libloading::Library, std::path::PathBuf)>,
     #[cfg(not(target_os = "linux"))]
-    pub external_so_lib: Option<!>,
+    pub native_lib: Option<!>,
 
     /// Run a garbage collector for BorTags every N basic blocks.
     pub(crate) gc_interval: u32,
@@ -641,7 +640,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
             tls: TlsData::default(),
             isolated_op: config.isolated_op,
             validate: config.validate,
-            fds: unix::FdTable::new(config.mute_stdout_stderr),
+            fds: shims::FdTable::new(config.mute_stdout_stderr),
             dirs: Default::default(),
             layouts,
             threads: ThreadManager::default(),
@@ -665,7 +664,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
             basic_block_count: 0,
             clock: Clock::new(config.isolated_op == IsolatedOp::Allow),
             #[cfg(target_os = "linux")]
-            external_so_lib: config.external_so_file.as_ref().map(|lib_file_path| {
+            native_lib: config.native_lib.as_ref().map(|lib_file_path| {
                 let target_triple = layout_cx.tcx.sess.opts.target_triple.triple();
                 // Check if host target == the session target.
                 if env!("TARGET") != target_triple {
@@ -687,7 +686,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
                 )
             }),
             #[cfg(not(target_os = "linux"))]
-            external_so_lib: config.external_so_file.as_ref().map(|_| {
+            native_lib: config.native_lib.as_ref().map(|_| {
                 panic!("loading external .so files is only supported on Linux")
             }),
             gc_interval: config.gc_interval,
@@ -802,7 +801,7 @@ impl VisitProvenance for MiriMachine<'_, '_> {
             preemption_rate: _,
             report_progress: _,
             basic_block_count: _,
-            external_so_lib: _,
+            native_lib: _,
             gc_interval: _,
             since_gc: _,
             num_cpus: _,
@@ -862,7 +861,7 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
 
     type Provenance = Provenance;
     type ProvenanceExtra = ProvenanceExtra;
-    type Bytes = Box<[u8]>;
+    type Bytes = MiriAllocBytes;
 
     type MemoryMap =
         MonoHashMap<AllocId, (MemoryKind, Allocation<Provenance, Self::AllocExtra, Self::Bytes>)>;
@@ -1088,8 +1087,9 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         id: AllocId,
         alloc: Cow<'b, Allocation>,
         kind: Option<MemoryKind>,
-    ) -> InterpResult<'tcx, Cow<'b, Allocation<Self::Provenance, Self::AllocExtra>>> {
-        let kind = kind.expect("we set our GLOBAL_KIND so this cannot be None");
+    ) -> InterpResult<'tcx, Cow<'b, Allocation<Self::Provenance, Self::AllocExtra, Self::Bytes>>>
+    {
+        let kind = kind.expect("we set our STATIC_KIND so this cannot be None");
         if ecx.machine.tracked_alloc_ids.contains(&id) {
             ecx.emit_diagnostic(NonHaltingDiagnostic::CreatedAlloc(
                 id,
@@ -1126,7 +1126,7 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
             Some(ecx.generate_stacktrace())
         };
 
-        let alloc: Allocation<Provenance, Self::AllocExtra> = alloc.adjust_from_tcx(
+        let alloc: Allocation<Provenance, Self::AllocExtra, Self::Bytes> = alloc.adjust_from_tcx(
             &ecx.tcx,
             AllocExtra {
                 borrow_tracker,

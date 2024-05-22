@@ -20,6 +20,7 @@ use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, PlaceContext, Vis
 use rustc_middle::mir::*;
 use rustc_middle::ty::GenericArgs;
 use rustc_middle::ty::{self, List, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::{bug, span_bug};
 use rustc_span::Span;
 
 use rustc_index::{Idx, IndexSlice, IndexVec};
@@ -469,7 +470,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                 self.validate_operand(operand)?;
             }
 
-            Rvalue::BinaryOp(op, box (lhs, rhs)) | Rvalue::CheckedBinaryOp(op, box (lhs, rhs)) => {
+            Rvalue::BinaryOp(op, box (lhs, rhs)) => {
                 let op = *op;
                 let lhs_ty = lhs.ty(self.body, self.tcx);
 
@@ -538,10 +539,13 @@ impl<'tcx> Validator<'_, 'tcx> {
                     | BinOp::Offset
                     | BinOp::Add
                     | BinOp::AddUnchecked
+                    | BinOp::AddWithOverflow
                     | BinOp::Sub
                     | BinOp::SubUnchecked
+                    | BinOp::SubWithOverflow
                     | BinOp::Mul
                     | BinOp::MulUnchecked
+                    | BinOp::MulWithOverflow
                     | BinOp::BitXor
                     | BinOp::BitAnd
                     | BinOp::BitOr

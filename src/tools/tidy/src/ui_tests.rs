@@ -16,7 +16,7 @@ const ENTRY_LIMIT: usize = 900;
 // FIXME: The following limits should be reduced eventually.
 
 const ISSUES_ENTRY_LIMIT: usize = 1676;
-const ROOT_ENTRY_LIMIT: usize = 859;
+const ROOT_ENTRY_LIMIT: usize = 757;
 
 const EXPECTED_TEST_FILE_EXTENSIONS: &[&str] = &[
     "rs",     // test source files
@@ -41,6 +41,7 @@ const EXTENSION_EXCEPTION_PATHS: &[&str] = &[
     "tests/ui/macros/not-utf8.bin", // testing including data with the include macros
     "tests/ui/macros/syntax-extension-source-utils-files/includeme.fragment", // more include
     "tests/ui/proc-macro/auxiliary/included-file.txt", // more include
+    "tests/ui/unpretty/auxiliary/data.txt", // more include
     "tests/ui/invalid/foo.natvis.xml", // sample debugger visualizer
     "tests/ui/sanitizer/dataflow-abilist.txt", // dataflow sanitizer ABI list file
     "tests/ui/shell-argfiles/shell-argfiles.args", // passing args via a file

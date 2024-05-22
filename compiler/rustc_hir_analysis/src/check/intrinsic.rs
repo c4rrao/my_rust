@@ -9,6 +9,7 @@ use crate::errors::{
 
 use rustc_errors::{codes::*, struct_span_code_err, DiagMessage};
 use rustc_hir as hir;
+use rustc_middle::bug;
 use rustc_middle::traits::{ObligationCause, ObligationCauseCode};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::def_id::LocalDefId;
@@ -70,13 +71,13 @@ fn equate_intrinsic_type<'tcx>(
 }
 
 /// Returns the unsafety of the given intrinsic.
-pub fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hir::Unsafety {
+pub fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hir::Safety {
     let has_safe_attr = if tcx.has_attr(intrinsic_id, sym::rustc_intrinsic) {
-        tcx.fn_sig(intrinsic_id).skip_binder().unsafety()
+        tcx.fn_sig(intrinsic_id).skip_binder().safety()
     } else {
         match tcx.has_attr(intrinsic_id, sym::rustc_safe_intrinsic) {
-            true => hir::Unsafety::Normal,
-            false => hir::Unsafety::Unsafe,
+            true => hir::Safety::Safe,
+            false => hir::Safety::Unsafe,
         }
     };
     let is_in_list = match tcx.item_name(intrinsic_id.into()) {
@@ -135,8 +136,8 @@ pub fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -
         | sym::fmul_algebraic
         | sym::fdiv_algebraic
         | sym::frem_algebraic
-        | sym::const_eval_select => hir::Unsafety::Normal,
-        _ => hir::Unsafety::Unsafe,
+        | sym::const_eval_select => hir::Safety::Safe,
+        _ => hir::Safety::Unsafe,
     };
 
     if has_safe_attr != is_in_list {
@@ -196,7 +197,7 @@ pub fn check_intrinsic_type(
         })
     };
 
-    let (n_tps, n_lts, n_cts, inputs, output, unsafety) = if name_str.starts_with("atomic_") {
+    let (n_tps, n_lts, n_cts, inputs, output, safety) = if name_str.starts_with("atomic_") {
         let split: Vec<&str> = name_str.split('_').collect();
         assert!(split.len() >= 2, "Atomic intrinsic in an incorrect format");
 
@@ -218,9 +219,9 @@ pub fn check_intrinsic_type(
                 return;
             }
         };
-        (n_tps, 0, 0, inputs, output, hir::Unsafety::Unsafe)
+        (n_tps, 0, 0, inputs, output, hir::Safety::Unsafe)
     } else {
-        let unsafety = intrinsic_operation_unsafety(tcx, intrinsic_id);
+        let safety = intrinsic_operation_unsafety(tcx, intrinsic_id);
         let (n_tps, n_cts, inputs, output) = match intrinsic_name {
             sym::abort => (0, 0, vec![], tcx.types.never),
             sym::unreachable => (0, 0, vec![], tcx.types.never),
@@ -513,14 +514,14 @@ pub fn check_intrinsic_type(
                     [mut_u8],
                     tcx.types.unit,
                     false,
-                    hir::Unsafety::Normal,
+                    hir::Safety::Safe,
                     Abi::Rust,
                 ));
                 let catch_fn_ty = ty::Binder::dummy(tcx.mk_fn_sig(
                     [mut_u8, mut_u8],
                     tcx.types.unit,
                     false,
-                    hir::Unsafety::Normal,
+                    hir::Safety::Safe,
                     Abi::Rust,
                 ));
                 (
@@ -606,6 +607,7 @@ pub fn check_intrinsic_type(
             | sym::simd_bitreverse
             | sym::simd_ctlz
             | sym::simd_cttz
+            | sym::simd_ctpop
             | sym::simd_fsqrt
             | sym::simd_fsin
             | sym::simd_fcos
@@ -655,9 +657,9 @@ pub fn check_intrinsic_type(
                 return;
             }
         };
-        (n_tps, 0, n_cts, inputs, output, unsafety)
+        (n_tps, 0, n_cts, inputs, output, safety)
     };
-    let sig = tcx.mk_fn_sig(inputs, output, false, unsafety, abi);
+    let sig = tcx.mk_fn_sig(inputs, output, false, safety, abi);
     let sig = ty::Binder::bind_with_vars(sig, bound_vars);
     equate_intrinsic_type(tcx, span, intrinsic_id, n_tps, n_lts, n_cts, sig)
 }

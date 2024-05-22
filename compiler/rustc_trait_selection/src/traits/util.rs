@@ -6,8 +6,9 @@ use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_errors::Diag;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::{InferCtxt, InferOk};
+use rustc_middle::bug;
 use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, ImplSubject, ToPredicate, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::ty::{self, ImplSubject, Ty, TyCtxt, TypeVisitableExt, Upcast};
 use rustc_middle::ty::{TypeFoldable, TypeFolder, TypeSuperFoldable};
 use rustc_span::Span;
 use smallvec::{smallvec, SmallVec};
@@ -104,7 +105,7 @@ impl<'tcx> TraitAliasExpander<'tcx> {
     fn expand(&mut self, item: &TraitAliasExpansionInfo<'tcx>) -> bool {
         let tcx = self.tcx;
         let trait_ref = item.trait_ref();
-        let pred = trait_ref.to_predicate(tcx);
+        let pred = trait_ref.upcast(tcx);
 
         debug!("expand_trait_aliases: trait_ref={:?}", trait_ref);
 
@@ -121,7 +122,7 @@ impl<'tcx> TraitAliasExpander<'tcx> {
             .iter()
             .rev()
             .skip(1)
-            .any(|&(tr, _)| anonymize_predicate(tcx, tr.to_predicate(tcx)) == anon_pred)
+            .any(|&(tr, _)| anonymize_predicate(tcx, tr.upcast(tcx)) == anon_pred)
         {
             return false;
         }

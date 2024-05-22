@@ -17,12 +17,9 @@ use rustc_span::{Span, Symbol, DUMMY_SP};
 use crate::check_attr::ProcMacroKind;
 use crate::lang_items::Duplicate;
 
-#[derive(Diagnostic)]
+#[derive(LintDiagnostic)]
 #[diag(passes_incorrect_do_not_recommend_location)]
-pub struct IncorrectDoNotRecommendLocation {
-    #[primary_span]
-    pub span: Span,
-}
+pub struct IncorrectDoNotRecommendLocation;
 
 #[derive(LintDiagnostic)]
 #[diag(passes_outer_crate_level_attr)]
@@ -1086,14 +1083,16 @@ pub struct BreakInsideClosure<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_break_inside_async_block, code = E0267)]
-pub struct BreakInsideAsyncBlock<'a> {
+#[diag(passes_break_inside_coroutine, code = E0267)]
+pub struct BreakInsideCoroutine<'a> {
     #[primary_span]
     #[label]
     pub span: Span,
-    #[label(passes_async_block_label)]
-    pub closure_span: Span,
+    #[label(passes_coroutine_label)]
+    pub coroutine_span: Span,
     pub name: &'a str,
+    pub kind: &'a str,
+    pub source: &'a str,
 }
 
 #[derive(Diagnostic)]

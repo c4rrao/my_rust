@@ -20,10 +20,11 @@ use rustc_middle::query::Providers;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::trait_def::TraitSpecializationKind;
 use rustc_middle::ty::{
-    self, AdtKind, GenericParamDefKind, ToPredicate, Ty, TyCtxt, TypeFoldable, TypeSuperVisitable,
-    TypeVisitable, TypeVisitableExt, TypeVisitor,
+    self, AdtKind, GenericParamDefKind, Ty, TyCtxt, TypeFoldable, TypeSuperVisitable,
+    TypeVisitable, TypeVisitableExt, TypeVisitor, Upcast,
 };
 use rustc_middle::ty::{GenericArgKind, GenericArgs};
+use rustc_middle::{bug, span_bug};
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::{Span, DUMMY_SP};
@@ -431,7 +432,7 @@ fn check_gat_where_clauses(tcx: TyCtxt<'_>, trait_def_id: LocalDefId) {
             }
             let gat_generics = tcx.generics_of(gat_def_id);
             // FIXME(jackh726): we can also warn in the more general case
-            if gat_generics.params.is_empty() {
+            if gat_generics.is_own_empty() {
                 continue;
             }
 
@@ -684,7 +685,7 @@ fn gather_gat_bounds<'tcx, T: TypeFoldable<TyCtxt<'tcx>>>(
                 // `Self: 'me`.)
                 bounds.insert(
                     ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(ty_param, region_param))
-                        .to_predicate(tcx),
+                        .upcast(tcx),
                 );
             }
         }
@@ -729,7 +730,7 @@ fn gather_gat_bounds<'tcx, T: TypeFoldable<TyCtxt<'tcx>>>(
                         region_a_param,
                         region_b_param,
                     ))
-                    .to_predicate(tcx),
+                    .upcast(tcx),
                 );
             }
         }
@@ -1136,7 +1137,7 @@ fn check_type_defn<'tcx>(
                     traits::ObligationCause::new(
                         hir_ty.span,
                         wfcx.body_def_id,
-                        traits::FieldSized {
+                        ObligationCauseCode::FieldSized {
                             adt_kind: match &item.kind {
                                 ItemKind::Struct(..) => AdtKind::Struct,
                                 ItemKind::Union(..) => AdtKind::Union,
@@ -1161,7 +1162,7 @@ fn check_type_defn<'tcx>(
                 let cause = traits::ObligationCause::new(
                     tcx.def_span(discr_def_id),
                     wfcx.body_def_id,
-                    traits::MiscObligation,
+                    ObligationCauseCode::Misc,
                 );
                 wfcx.register_obligation(traits::Obligation::new(
                     tcx,
@@ -1278,7 +1279,11 @@ fn check_item_type(
         wfcx.register_wf_obligation(ty_span, Some(WellFormedLoc::Ty(item_id)), item_ty.into());
         if forbid_unsized {
             wfcx.register_bound(
-                traits::ObligationCause::new(ty_span, wfcx.body_def_id, traits::WellFormed(None)),
+                traits::ObligationCause::new(
+                    ty_span,
+                    wfcx.body_def_id,
+                    ObligationCauseCode::WellFormed(None),
+                ),
                 wfcx.param_env,
                 item_ty,
                 tcx.require_lang_item(LangItem::Sized, None),
@@ -1293,7 +1298,11 @@ fn check_item_type(
 
         if should_check_for_sync {
             wfcx.register_bound(
-                traits::ObligationCause::new(ty_span, wfcx.body_def_id, traits::SharedStatic),
+                traits::ObligationCause::new(
+                    ty_span,
+                    wfcx.body_def_id,
+                    ObligationCauseCode::SharedStatic,
+                ),
                 wfcx.param_env,
                 item_ty,
                 tcx.require_lang_item(LangItem::Sync, Some(ty_span)),
@@ -1341,12 +1350,12 @@ fn check_impl<'tcx>(
                         // We already have a better span.
                         continue;
                     }
-                    if let Some(pred) = obligation.predicate.to_opt_poly_trait_pred()
+                    if let Some(pred) = obligation.predicate.as_trait_clause()
                         && pred.skip_binder().self_ty() == trait_ref.self_ty()
                     {
                         obligation.cause.span = hir_self_ty.span;
                     }
-                    if let Some(pred) = obligation.predicate.to_opt_poly_projection_pred()
+                    if let Some(pred) = obligation.predicate.as_projection_clause()
                         && pred.skip_binder().self_ty() == trait_ref.self_ty()
                     {
                         obligation.cause.span = hir_self_ty.span;
@@ -1400,7 +1409,7 @@ fn check_where_clauses<'tcx>(wfcx: &WfCheckingCtxt<'_, 'tcx>, span: Span, def_id
     //     struct Foo<T = Vec<[u32]>> { .. }
     //
     // Here, the default `Vec<[u32]>` is not WF because `[u32]: Sized` does not hold.
-    for param in &generics.params {
+    for param in &generics.own_params {
         match param.kind {
             GenericParamDefKind::Type { .. } => {
                 if is_our_default(param) {
@@ -1542,7 +1551,7 @@ fn check_where_clauses<'tcx>(wfcx: &WfCheckingCtxt<'_, 'tcx>, span: Span, def_id
             let cause = traits::ObligationCause::new(
                 sp,
                 wfcx.body_def_id,
-                traits::ItemObligation(def_id.to_def_id()),
+                ObligationCauseCode::WhereClause(def_id.to_def_id(), DUMMY_SP),
             );
             traits::Obligation::new(tcx, cause, wfcx.param_env, pred)
         });
@@ -1879,7 +1888,7 @@ fn check_variances_for_type_defn<'tcx>(
             continue;
         }
 
-        let ty_param = &ty_generics.params[index];
+        let ty_param = &ty_generics.own_params[index];
         let hir_param = &hir_generics.params[index];
 
         if ty_param.def_id != hir_param.def_id.into() {
@@ -1982,7 +1991,11 @@ impl<'tcx> WfCheckingCtxt<'_, 'tcx> {
 
                 let obligation = traits::Obligation::new(
                     tcx,
-                    traits::ObligationCause::new(span, self.body_def_id, traits::TrivialBound),
+                    traits::ObligationCause::new(
+                        span,
+                        self.body_def_id,
+                        ObligationCauseCode::TrivialBound,
+                    ),
                     empty_env,
                     pred,
                 );

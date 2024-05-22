@@ -29,10 +29,11 @@ use rustc_middle::ty::{
     self, AdtKind, CanonicalUserType, GenericParamDefKind, IsIdentity, Ty, TyCtxt, UserType,
 };
 use rustc_middle::ty::{GenericArgKind, GenericArgsRef, UserArgs, UserSelfTy};
+use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::hygiene::DesugaringKind;
-use rustc_span::symbol::{kw, sym, Ident};
+use rustc_span::symbol::{kw, sym};
 use rustc_span::Span;
 use rustc_target::abi::FieldIdx;
 use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt as _;
@@ -409,7 +410,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub fn lower_ty(&self, hir_ty: &hir::Ty<'tcx>) -> LoweredTy<'tcx> {
         let ty = self.lowerer().lower_ty(hir_ty);
-        self.register_wf_obligation(ty.into(), hir_ty.span, traits::WellFormed(None));
+        self.register_wf_obligation(ty.into(), hir_ty.span, ObligationCauseCode::WellFormed(None));
         LoweredTy::from_raw(self, hir_ty.span, ty)
     }
 
@@ -520,7 +521,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         for arg in args.iter().filter(|arg| {
             matches!(arg.unpack(), GenericArgKind::Type(..) | GenericArgKind::Const(..))
         }) {
-            self.register_wf_obligation(arg, expr.span, traits::WellFormed(None));
+            self.register_wf_obligation(arg, expr.span, ObligationCauseCode::WellFormed(None));
         }
     }
 
@@ -624,10 +625,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// returns a type of `&T`, but the actual type we assign to the
     /// *expression* is `T`. So this function just peels off the return
     /// type by one layer to yield `T`.
-    pub(crate) fn make_overloaded_place_return_type(
-        &self,
-        method: MethodCallee<'tcx>,
-    ) -> ty::TypeAndMut<'tcx> {
+    pub(crate) fn make_overloaded_place_return_type(&self, method: MethodCallee<'tcx>) -> Ty<'tcx> {
         // extract method return type, which will be &T;
         let ret_ty = method.sig.output();
 
@@ -775,7 +773,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
         if let Some(&cached_result) = self.typeck_results.borrow().type_dependent_defs().get(hir_id)
         {
-            self.register_wf_obligation(ty.raw.into(), qself.span, traits::WellFormed(None));
+            self.register_wf_obligation(
+                ty.raw.into(),
+                qself.span,
+                ObligationCauseCode::WellFormed(None),
+            );
             // Return directly on cache hit. This is useful to avoid doubly reporting
             // errors with default match binding modes. See #44614.
             let def = cached_result.map_or(Res::Err, |(kind, def_id)| Res::Def(kind, def_id));
@@ -814,7 +816,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.register_wf_obligation(
                         ty.raw.into(),
                         qself.span,
-                        traits::WellFormed(None),
+                        ObligationCauseCode::WellFormed(None),
                     );
                 }
 
@@ -832,6 +834,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if item_name.name != kw::Empty {
                     if let Some(e) = self.report_method_error(
                         span,
+                        None,
                         ty.normalized,
                         item_name,
                         SelfSource::QPath(qself),
@@ -848,7 +851,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             });
 
         if result.is_ok() {
-            self.register_wf_obligation(ty.raw.into(), qself.span, traits::WellFormed(None));
+            self.register_wf_obligation(
+                ty.raw.into(),
+                qself.span,
+                ObligationCauseCode::WellFormed(None),
+            );
         }
 
         // Write back the new resolution.
@@ -860,76 +867,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         )
     }
 
-    /// Given a function `Node`, return its  `HirId` and `FnDecl` if it exists. Given a closure
-    /// that is the child of a function, return that function's `HirId` and `FnDecl` instead.
-    /// This may seem confusing at first, but this is used in diagnostics for `async fn`,
-    /// for example, where most of the type checking actually happens within a nested closure,
-    /// but we often want access to the parent function's signature.
-    ///
-    /// Otherwise, return false.
-    pub(crate) fn get_node_fn_decl(
-        &self,
-        node: Node<'tcx>,
-    ) -> Option<(LocalDefId, &'tcx hir::FnDecl<'tcx>, Ident, bool)> {
-        match node {
-            Node::Item(&hir::Item {
-                ident,
-                kind: hir::ItemKind::Fn(ref sig, ..),
-                owner_id,
-                ..
-            }) => {
-                // This is less than ideal, it will not suggest a return type span on any
-                // method called `main`, regardless of whether it is actually the entry point,
-                // but it will still present it as the reason for the expected type.
-                Some((owner_id.def_id, &sig.decl, ident, ident.name != sym::main))
-            }
-            Node::TraitItem(&hir::TraitItem {
-                ident,
-                kind: hir::TraitItemKind::Fn(ref sig, ..),
-                owner_id,
-                ..
-            }) => Some((owner_id.def_id, &sig.decl, ident, true)),
-            Node::ImplItem(&hir::ImplItem {
-                ident,
-                kind: hir::ImplItemKind::Fn(ref sig, ..),
-                owner_id,
-                ..
-            }) => Some((owner_id.def_id, &sig.decl, ident, false)),
-            Node::Expr(&hir::Expr {
-                hir_id,
-                kind:
-                    hir::ExprKind::Closure(hir::Closure {
-                        kind: hir::ClosureKind::Coroutine(..), ..
-                    }),
-                ..
-            }) => {
-                let (ident, sig, owner_id) = match self.tcx.parent_hir_node(hir_id) {
-                    Node::Item(&hir::Item {
-                        ident,
-                        kind: hir::ItemKind::Fn(ref sig, ..),
-                        owner_id,
-                        ..
-                    }) => (ident, sig, owner_id),
-                    Node::TraitItem(&hir::TraitItem {
-                        ident,
-                        kind: hir::TraitItemKind::Fn(ref sig, ..),
-                        owner_id,
-                        ..
-                    }) => (ident, sig, owner_id),
-                    Node::ImplItem(&hir::ImplItem {
-                        ident,
-                        kind: hir::ImplItemKind::Fn(ref sig, ..),
-                        owner_id,
-                        ..
-                    }) => (ident, sig, owner_id),
-                    _ => return None,
-                };
-                Some((owner_id.def_id, &sig.decl, ident, ident.name != sym::main))
-            }
-            _ => None,
-        }
-    }
-
     /// Given a `HirId`, return the `HirId` of the enclosing function, its `FnDecl`, and whether a
     /// suggestion can be made, `None` otherwise.
     pub fn get_fn_decl(
@@ -938,10 +875,73 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) -> Option<(LocalDefId, &'tcx hir::FnDecl<'tcx>, bool)> {
         // Get enclosing Fn, if it is a function or a trait method, unless there's a `loop` or
         // `while` before reaching it, as block tail returns are not available in them.
-        self.tcx.hir().get_return_block(blk_id).and_then(|blk_id| {
-            let parent = self.tcx.hir_node(blk_id);
-            self.get_node_fn_decl(parent)
-                .map(|(fn_id, fn_decl, _, is_main)| (fn_id, fn_decl, is_main))
+        self.tcx.hir().get_fn_id_for_return_block(blk_id).and_then(|item_id| {
+            match self.tcx.hir_node(item_id) {
+                Node::Item(&hir::Item {
+                    ident,
+                    kind: hir::ItemKind::Fn(ref sig, ..),
+                    owner_id,
+                    ..
+                }) => {
+                    // This is less than ideal, it will not suggest a return type span on any
+                    // method called `main`, regardless of whether it is actually the entry point,
+                    // but it will still present it as the reason for the expected type.
+                    Some((owner_id.def_id, sig.decl, ident.name != sym::main))
+                }
+                Node::TraitItem(&hir::TraitItem {
+                    kind: hir::TraitItemKind::Fn(ref sig, ..),
+                    owner_id,
+                    ..
+                }) => Some((owner_id.def_id, sig.decl, true)),
+                // FIXME: Suggestable if this is not a trait implementation
+                Node::ImplItem(&hir::ImplItem {
+                    kind: hir::ImplItemKind::Fn(ref sig, ..),
+                    owner_id,
+                    ..
+                }) => Some((owner_id.def_id, sig.decl, false)),
+                Node::Expr(&hir::Expr {
+                    hir_id,
+                    kind: hir::ExprKind::Closure(&hir::Closure { def_id, kind, fn_decl, .. }),
+                    ..
+                }) => {
+                    match kind {
+                        hir::ClosureKind::CoroutineClosure(_) => {
+                            // FIXME(async_closures): Implement this.
+                            return None;
+                        }
+                        hir::ClosureKind::Closure => Some((def_id, fn_decl, true)),
+                        hir::ClosureKind::Coroutine(hir::CoroutineKind::Desugared(
+                            _,
+                            hir::CoroutineSource::Fn,
+                        )) => {
+                            let (ident, sig, owner_id) = match self.tcx.parent_hir_node(hir_id) {
+                                Node::Item(&hir::Item {
+                                    ident,
+                                    kind: hir::ItemKind::Fn(ref sig, ..),
+                                    owner_id,
+                                    ..
+                                }) => (ident, sig, owner_id),
+                                Node::TraitItem(&hir::TraitItem {
+                                    ident,
+                                    kind: hir::TraitItemKind::Fn(ref sig, ..),
+                                    owner_id,
+                                    ..
+                                }) => (ident, sig, owner_id),
+                                Node::ImplItem(&hir::ImplItem {
+                                    ident,
+                                    kind: hir::ImplItemKind::Fn(ref sig, ..),
+                                    owner_id,
+                                    ..
+                                }) => (ident, sig, owner_id),
+                                _ => return None,
+                            };
+                            Some((owner_id.def_id, sig.decl, ident.name != sym::main))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
         })
     }
 
@@ -1404,11 +1404,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         hir_id: HirId,
     ) {
         self.add_required_obligations_with_code(span, def_id, args, |idx, span| {
-            if span.is_dummy() {
-                ObligationCauseCode::ExprItemObligation(def_id, hir_id, idx)
-            } else {
-                ObligationCauseCode::ExprBindingObligation(def_id, span, hir_id, idx)
-            }
+            ObligationCauseCode::WhereClauseInExpr(def_id, span, hir_id, idx)
         })
     }
 

@@ -366,7 +366,7 @@ impl WalkItemKind for ItemKind {
             }
             ItemKind::Impl(box Impl {
                 defaultness: _,
-                unsafety: _,
+                safety: _,
                 generics,
                 constness: _,
                 polarity: _,
@@ -384,7 +384,7 @@ impl WalkItemKind for ItemKind {
                 try_visit!(visitor.visit_generics(generics));
                 try_visit!(visitor.visit_variant_data(struct_definition));
             }
-            ItemKind::Trait(box Trait { unsafety: _, is_auto: _, generics, bounds, items }) => {
+            ItemKind::Trait(box Trait { safety: _, is_auto: _, generics, bounds, items }) => {
                 try_visit!(visitor.visit_generics(generics));
                 walk_list!(visitor, visit_param_bound, bounds, BoundKind::SuperTraits);
                 walk_list!(visitor, visit_assoc_item, items, AssocCtxt::Trait);
@@ -401,6 +401,19 @@ impl WalkItemKind for ItemKind {
                 }
                 try_visit!(visitor.visit_path(path, *id));
                 visit_opt!(visitor, visit_ident, *rename);
+                visit_opt!(visitor, visit_block, body);
+            }
+            ItemKind::DelegationMac(box DelegationMac { qself, prefix, suffixes, body }) => {
+                if let Some(qself) = qself {
+                    try_visit!(visitor.visit_ty(&qself.ty));
+                }
+                try_visit!(visitor.visit_path(prefix, item.id));
+                for (ident, rename) in suffixes {
+                    visitor.visit_ident(*ident);
+                    if let Some(rename) = rename {
+                        visitor.visit_ident(*rename);
+                    }
+                }
                 visit_opt!(visitor, visit_block, body);
             }
         }
@@ -517,8 +530,8 @@ pub fn walk_use_tree<'a, V: Visitor<'a>>(
             visit_opt!(visitor, visit_ident, rename);
         }
         UseTreeKind::Glob => {}
-        UseTreeKind::Nested(ref use_trees) => {
-            for &(ref nested_tree, nested_id) in use_trees {
+        UseTreeKind::Nested { ref items, .. } => {
+            for &(ref nested_tree, nested_id) in items {
                 try_visit!(visitor.visit_use_tree(nested_tree, nested_id, true));
             }
         }
@@ -813,6 +826,19 @@ impl WalkItemKind for AssocItemKind {
                 }
                 try_visit!(visitor.visit_path(path, *id));
                 visit_opt!(visitor, visit_ident, *rename);
+                visit_opt!(visitor, visit_block, body);
+            }
+            AssocItemKind::DelegationMac(box DelegationMac { qself, prefix, suffixes, body }) => {
+                if let Some(qself) = qself {
+                    try_visit!(visitor.visit_ty(&qself.ty));
+                }
+                try_visit!(visitor.visit_path(prefix, item.id));
+                for (ident, rename) in suffixes {
+                    visitor.visit_ident(*ident);
+                    if let Some(rename) = rename {
+                        visitor.visit_ident(*rename);
+                    }
+                }
                 visit_opt!(visitor, visit_block, body);
             }
         }

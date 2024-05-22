@@ -454,12 +454,12 @@ declare_features! (
     (incomplete, dyn_star, "1.65.0", Some(102425)),
     /// Uses generic effect parameters for ~const bounds
     (unstable, effects, "1.72.0", Some(102090)),
-    /// Allows `X..Y` patterns.
-    (unstable, exclusive_range_pattern, "1.11.0", Some(37854)),
     /// Allows exhaustive pattern matching on types that contain uninhabited types.
     (unstable, exhaustive_patterns, "1.13.0", Some(51085)),
     /// Allows explicit tail calls via `become` expression.
     (incomplete, explicit_tail_calls, "1.72.0", Some(112788)),
+    /// Uses 2024 rules for matching `expr` fragments in macros. Also enables `expr_2021` fragment.
+    (incomplete, expr_fragment_specifier_2024, "CURRENT_RUSTC_VERSION", Some(123742)),
     /// Allows using `efiapi`, `sysv64` and `win64` as calling convention
     /// for functions with varargs.
     (unstable, extended_varargs_abi_support, "1.65.0", Some(100189)),
@@ -489,6 +489,8 @@ declare_features! (
     (incomplete, generic_const_exprs, "1.56.0", Some(76560)),
     /// Allows generic parameters and where-clauses on free & associated const items.
     (incomplete, generic_const_items, "1.73.0", Some(113521)),
+    /// Allows registering static items globally, possibly across crates, to iterate over at runtime.
+    (unstable, global_registration, "CURRENT_RUSTC_VERSION", Some(125119)),
     /// Allows using `..=X` as a patterns in slices.
     (unstable, half_open_range_patterns_in_slices, "1.66.0", Some(67264)),
     /// Allows `if let` guard in match arms.
@@ -581,6 +583,9 @@ declare_features! (
     (incomplete, repr128, "1.16.0", Some(56071)),
     /// Allows `repr(simd)` and importing the various simd intrinsics.
     (unstable, repr_simd, "1.4.0", Some(27731)),
+    /// Allows enums like Result<T, E> to be used across FFI, if T's niche value can
+    /// be used to describe E or vise-versa.
+    (unstable, result_ffi_guarantees, "CURRENT_RUSTC_VERSION", Some(110503)),
     /// Allows bounding the return type of AFIT/RPITIT.
     (incomplete, return_type_notation, "1.70.0", Some(109417)),
     /// Allows `extern "rust-cold"`.

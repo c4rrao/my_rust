@@ -42,7 +42,6 @@
 #[macro_use]
 extern crate tracing;
 
-mod array_into_iter;
 mod async_fn_in_trait;
 pub mod builtin;
 mod context;
@@ -55,6 +54,7 @@ mod expect;
 mod for_loops_over_fallibles;
 mod foreign_modules;
 pub mod hidden_unicode_codepoints;
+mod impl_trait_overcaptures;
 mod internal;
 mod invalid_from_utf8;
 mod late;
@@ -75,18 +75,18 @@ mod passes;
 mod ptr_nulls;
 mod redundant_semicolon;
 mod reference_casting;
+mod shadowed_into_iter;
 mod traits;
 mod types;
 mod unit_bindings;
 mod unused;
 
-pub use array_into_iter::ARRAY_INTO_ITER;
+pub use shadowed_into_iter::{ARRAY_INTO_ITER, BOXED_SLICE_INTO_ITER};
 
 use rustc_hir::def_id::LocalModDefId;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
 
-use array_into_iter::ArrayIntoIter;
 use async_fn_in_trait::AsyncFnInTrait;
 use builtin::*;
 use deref_into_dyn_supertrait::*;
@@ -94,6 +94,7 @@ use drop_forget_useless::*;
 use enum_intrinsics_non_enums::EnumIntrinsicsNonEnums;
 use for_loops_over_fallibles::*;
 use hidden_unicode_codepoints::*;
+use impl_trait_overcaptures::ImplTraitOvercaptures;
 use internal::*;
 use invalid_from_utf8::*;
 use let_underscore::*;
@@ -110,6 +111,7 @@ use pass_by_value::*;
 use ptr_nulls::*;
 use redundant_semicolon::*;
 use reference_casting::*;
+use shadowed_into_iter::ShadowedIntoIter;
 use traits::*;
 use types::*;
 use unit_bindings::*;
@@ -213,7 +215,7 @@ late_lint_methods!(
             DerefNullPtr: DerefNullPtr,
             UnstableFeatures: UnstableFeatures,
             UngatedAsyncFnTrackCaller: UngatedAsyncFnTrackCaller,
-            ArrayIntoIter: ArrayIntoIter::default(),
+            ShadowedIntoIter: ShadowedIntoIter,
             DropTraitConstraints: DropTraitConstraints,
             TemporaryCStringAsPtr: TemporaryCStringAsPtr,
             NonPanicFmt: NonPanicFmt,
@@ -228,6 +230,7 @@ late_lint_methods!(
             MissingDoc: MissingDoc,
             AsyncFnInTrait: AsyncFnInTrait,
             NonLocalDefinitions: NonLocalDefinitions::default(),
+            ImplTraitOvercaptures: ImplTraitOvercaptures,
         ]
     ]
 );

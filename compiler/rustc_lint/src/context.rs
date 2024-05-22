@@ -30,7 +30,7 @@ use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
 use rustc_middle::bug;
 use rustc_middle::middle::privacy::EffectiveVisibilities;
 use rustc_middle::ty::layout::{LayoutError, LayoutOfHelpers, TyAndLayout};
-use rustc_middle::ty::print::{with_no_trimmed_paths, PrintError};
+use rustc_middle::ty::print::{with_no_trimmed_paths, PrintError, PrintTraitRefExt as _};
 use rustc_middle::ty::{self, print::Printer, GenericArg, RegisteredTools, Ty, TyCtxt};
 use rustc_session::lint::{BuiltinLintDiag, LintExpectationId};
 use rustc_session::lint::{FutureIncompatibleInfo, Level, Lint, LintBuffer, LintId};
@@ -527,30 +527,24 @@ pub struct EarlyContext<'a> {
     pub buffered: LintBuffer,
 }
 
-pub trait LintContext {
-    fn sess(&self) -> &Session;
-
+impl EarlyContext<'_> {
     /// Emit a lint at the appropriate level, with an optional associated span and an existing
     /// diagnostic.
     ///
     /// [`lint_level`]: rustc_middle::lint::lint_level#decorate-signature
     #[rustc_lint_diagnostics]
-    fn span_lint_with_diagnostics(
+    pub fn span_lint_with_diagnostics(
         &self,
         lint: &'static Lint,
-        span: Option<impl Into<MultiSpan>>,
-        msg: impl Into<DiagMessage>,
-        decorate: impl for<'a, 'b> FnOnce(&'b mut Diag<'a, ()>),
+        span: MultiSpan,
         diagnostic: BuiltinLintDiag,
     ) {
-        // We first generate a blank diagnostic.
-        self.opt_span_lint(lint, span, msg, |db| {
-            // Now, set up surrounding context.
-            diagnostics::builtin(self.sess(), diagnostic, db);
-            // Rewrap `db`, and pass control to the user.
-            decorate(db)
-        });
+        diagnostics::emit_buffered_lint(self, lint, span, diagnostic)
     }
+}
+
+pub trait LintContext {
+    fn sess(&self) -> &Session;
 
     // FIXME: These methods should not take an Into<MultiSpan> -- instead, callers should need to
     // set the span in their `decorate` function (preferably using set_span).

@@ -90,6 +90,7 @@ use rustc_middle::query::Providers;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::ty::{GenericArgs, GenericArgsRef};
+use rustc_middle::{bug, span_bug};
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{def_id::CRATE_DEF_ID, BytePos, Span, Symbol, DUMMY_SP};
@@ -343,9 +344,10 @@ fn bounds_from_generic_predicates<'tcx>(
                 let mut projections_str = vec![];
                 for projection in &projections {
                     let p = projection.skip_binder();
-                    let alias_ty = p.projection_ty;
-                    if bound == tcx.parent(alias_ty.def_id) && alias_ty.self_ty() == ty {
-                        let name = tcx.item_name(alias_ty.def_id);
+                    if bound == tcx.parent(p.projection_term.def_id)
+                        && p.projection_term.self_ty() == ty
+                    {
+                        let name = tcx.item_name(p.projection_term.def_id);
                         projections_str.push(format!("{} = {}", name, p.term));
                     }
                 }
@@ -454,7 +456,7 @@ fn fn_sig_suggestion<'tcx>(
 
     let output = if !output.is_unit() { format!(" -> {output}") } else { String::new() };
 
-    let unsafety = sig.unsafety.prefix_str();
+    let safety = sig.safety.prefix_str();
     let (generics, where_clauses) = bounds_from_generic_predicates(tcx, predicates);
 
     // FIXME: this is not entirely correct, as the lifetimes from borrowed params will
@@ -462,9 +464,7 @@ fn fn_sig_suggestion<'tcx>(
     // lifetimes between the `impl` and the `trait`, but this should be good enough to
     // fill in a significant portion of the missing code, and other subsequent
     // suggestions can help the user fix the code.
-    format!(
-        "{unsafety}{asyncness}fn {ident}{generics}({args}){output}{where_clauses} {{ todo!() }}"
-    )
+    format!("{safety}{asyncness}fn {ident}{generics}({args}){output}{where_clauses} {{ todo!() }}")
 }
 
 /// Return placeholder code for the given associated item.

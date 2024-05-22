@@ -584,11 +584,11 @@ macro_rules! uint_impl {
             // Thus, rather than using `overflowing_sub` that produces a wrapping
             // subtraction, check it ourself so we can use an unchecked one.
 
-            if self >= rhs {
+            if self < rhs {
+                None
+            } else {
                 // SAFETY: just checked this can't overflow
                 Some(unsafe { intrinsics::unchecked_sub(self, rhs) })
-            } else {
-                None
             }
         }
 
@@ -2764,6 +2764,7 @@ macro_rules! uint_impl {
         /// ```
         #[doc = concat!("assert_eq!(2", stringify!($SelfT), ".next_power_of_two(), 2);")]
         #[doc = concat!("assert_eq!(3", stringify!($SelfT), ".next_power_of_two(), 4);")]
+        #[doc = concat!("assert_eq!(0", stringify!($SelfT), ".next_power_of_two(), 1);")]
         /// ```
         #[stable(feature = "rust1", since = "1.0.0")]
         #[rustc_const_stable(feature = "const_int_pow", since = "1.50.0")]

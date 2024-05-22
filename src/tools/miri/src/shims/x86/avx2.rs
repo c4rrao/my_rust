@@ -1,5 +1,5 @@
-use crate::rustc_middle::ty::layout::LayoutOf as _;
 use rustc_middle::mir;
+use rustc_middle::ty::layout::LayoutOf as _;
 use rustc_middle::ty::Ty;
 use rustc_span::Symbol;
 use rustc_target::spec::abi::Abi;
@@ -70,6 +70,8 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                 let (dest, dest_len) = this.mplace_to_simd(dest)?;
 
                 // There are cases like dest: i32x4, offsets: i64x2
+                // If dest has more elements than offset, extra dest elements are filled with zero.
+                // If offsets has more elements than dest, extra offsets are ignored.
                 let actual_len = dest_len.min(offsets_len);
 
                 assert_eq!(dest_len, mask_len);
@@ -79,7 +81,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                 let scale = this.read_scalar(scale)?.to_i8()?;
                 if !matches!(scale, 1 | 2 | 4 | 8) {
-                    throw_unsup_format!("invalid gather scale {scale}");
+                    panic!("invalid gather scale {scale}");
                 }
                 let scale = i64::from(scale);
 
@@ -438,6 +440,6 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             }
             _ => return Ok(EmulateItemResult::NotSupported),
         }
-        Ok(EmulateItemResult::NeedsJumping)
+        Ok(EmulateItemResult::NeedsReturn)
     }
 }

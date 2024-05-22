@@ -95,12 +95,15 @@ impl<'a> Parser<'a> {
             debug!("parse_qpath: (decrement) count={:?}", self.unmatched_angle_bracket_count);
         }
 
-        if !self.recover_colon_before_qpath_proj() {
+        let is_import_coupler = self.is_import_coupler();
+        if !is_import_coupler && !self.recover_colon_before_qpath_proj() {
             self.expect(&token::PathSep)?;
         }
 
         let qself = P(QSelf { ty, path_span, position: path.segments.len() });
-        self.parse_path_segments(&mut path.segments, style, None)?;
+        if !is_import_coupler {
+            self.parse_path_segments(&mut path.segments, style, None)?;
+        }
 
         Ok((
             qself,
@@ -160,7 +163,7 @@ impl<'a> Parser<'a> {
         style: PathStyle,
         ty_generics: Option<&Generics>,
     ) -> PResult<'a, Path> {
-        let reject_generics_if_mod_style = |parser: &Parser<'_>, path: &Path| {
+        let reject_generics_if_mod_style = |parser: &Parser<'_>, path: Path| {
             // Ensure generic arguments don't end up in attribute paths, such as:
             //
             //     macro_rules! m {
@@ -178,21 +181,26 @@ impl<'a> Parser<'a> {
                     .map(|arg| arg.span())
                     .collect::<Vec<_>>();
                 parser.dcx().emit_err(errors::GenericsInPath { span });
+                // Ignore these arguments to prevent unexpected behaviors.
+                let segments = path
+                    .segments
+                    .iter()
+                    .map(|segment| PathSegment { ident: segment.ident, id: segment.id, args: None })
+                    .collect();
+                Path { segments, ..path }
+            } else {
+                path
             }
         };
 
-        maybe_whole!(self, NtPath, |path| {
-            reject_generics_if_mod_style(self, &path);
-            path.into_inner()
-        });
+        maybe_whole!(self, NtPath, |path| reject_generics_if_mod_style(self, path.into_inner()));
 
         if let token::Interpolated(nt) = &self.token.kind {
-            if let token::NtTy(ty) = &nt.0 {
+            if let token::NtTy(ty) = &**nt {
                 if let ast::TyKind::Path(None, path) = &ty.kind {
                     let path = path.clone();
                     self.bump();
-                    reject_generics_if_mod_style(self, &path);
-                    return Ok(path);
+                    return Ok(reject_generics_if_mod_style(self, path));
                 }
             }
         }

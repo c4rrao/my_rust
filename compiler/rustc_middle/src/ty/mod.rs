@@ -28,7 +28,7 @@ use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::util::Discr;
 pub use adt::*;
 pub use assoc::*;
-pub use generic_args::*;
+pub use generic_args::{GenericArgKind, TermKind, *};
 pub use generics::*;
 pub use intrinsic::IntrinsicDef;
 use rustc_ast as ast;
@@ -48,7 +48,8 @@ use rustc_hir::def::{CtorKind, CtorOf, DefKind, DocLinkResMap, LifetimeRes, Res}
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LocalDefIdMap};
 use rustc_index::IndexVec;
 use rustc_macros::{
-    Decodable, Encodable, HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable,
+    extension, Decodable, Encodable, HashStable, TyDecodable, TyEncodable, TypeFoldable,
+    TypeVisitable,
 };
 use rustc_query_system::ich::StableHashingContext;
 use rustc_serialize::{Decodable, Encodable};
@@ -96,13 +97,13 @@ pub use self::list::{List, ListWithCachedTypeInfo};
 pub use self::parameterized::ParameterizedOverTcx;
 pub use self::pattern::{Pattern, PatternKind};
 pub use self::predicate::{
-    Clause, ClauseKind, CoercePredicate, ExistentialPredicate, ExistentialProjection,
-    ExistentialTraitRef, NormalizesTo, OutlivesPredicate, PolyCoercePredicate,
-    PolyExistentialPredicate, PolyExistentialProjection, PolyExistentialTraitRef,
-    PolyProjectionPredicate, PolyRegionOutlivesPredicate, PolySubtypePredicate, PolyTraitPredicate,
-    PolyTraitRef, PolyTypeOutlivesPredicate, Predicate, PredicateKind, ProjectionPredicate,
-    RegionOutlivesPredicate, SubtypePredicate, ToPolyTraitRef, ToPredicate, TraitPredicate,
-    TraitRef, TypeOutlivesPredicate,
+    AliasTerm, Clause, ClauseKind, CoercePredicate, ExistentialPredicate,
+    ExistentialPredicateStableCmpExt, ExistentialProjection, ExistentialTraitRef, NormalizesTo,
+    OutlivesPredicate, PolyCoercePredicate, PolyExistentialPredicate, PolyExistentialProjection,
+    PolyExistentialTraitRef, PolyProjectionPredicate, PolyRegionOutlivesPredicate,
+    PolySubtypePredicate, PolyTraitPredicate, PolyTraitRef, PolyTypeOutlivesPredicate, Predicate,
+    PredicateKind, ProjectionPredicate, RegionOutlivesPredicate, SubtypePredicate, ToPolyTraitRef,
+    TraitPredicate, TraitRef, TypeOutlivesPredicate,
 };
 pub use self::region::{
     BoundRegion, BoundRegionKind, BoundRegionKind::*, EarlyParamRegion, LateParamRegion, Region,
@@ -266,68 +267,13 @@ pub struct ImplHeader<'tcx> {
 pub struct ImplTraitHeader<'tcx> {
     pub trait_ref: ty::EarlyBinder<ty::TraitRef<'tcx>>,
     pub polarity: ImplPolarity,
-    pub unsafety: hir::Unsafety,
+    pub safety: hir::Safety,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, TypeFoldable, TypeVisitable)]
 pub enum ImplSubject<'tcx> {
     Trait(TraitRef<'tcx>),
     Inherent(Ty<'tcx>),
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable, Debug)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub enum ImplPolarity {
-    /// `impl Trait for Type`
-    Positive,
-    /// `impl !Trait for Type`
-    Negative,
-    /// `#[rustc_reservation_impl] impl Trait for Type`
-    ///
-    /// This is a "stability hack", not a real Rust feature.
-    /// See #64631 for details.
-    Reservation,
-}
-
-impl fmt::Display for ImplPolarity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Positive => f.write_str("positive"),
-            Self::Negative => f.write_str("negative"),
-            Self::Reservation => f.write_str("reservation"),
-        }
-    }
-}
-
-/// Polarity for a trait predicate. May either be negative or positive.
-/// Distinguished from [`ImplPolarity`] since we never compute goals with
-/// "reservation" level.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable, Debug)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub enum PredicatePolarity {
-    /// `Type: Trait`
-    Positive,
-    /// `Type: !Trait`
-    Negative,
-}
-
-impl PredicatePolarity {
-    /// Flips polarity by turning `Positive` into `Negative` and `Negative` into `Positive`.
-    pub fn flip(&self) -> PredicatePolarity {
-        match self {
-            PredicatePolarity::Positive => PredicatePolarity::Negative,
-            PredicatePolarity::Negative => PredicatePolarity::Positive,
-        }
-    }
-}
-
-impl fmt::Display for PredicatePolarity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Positive => f.write_str("positive"),
-            Self::Negative => f.write_str("negative"),
-        }
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable, Debug)]
@@ -530,7 +476,7 @@ pub struct CReaderCacheKey {
 #[rustc_pass_by_value]
 pub struct Ty<'tcx>(Interned<'tcx, WithCachedTypeInfo<TyKind<'tcx>>>);
 
-impl<'tcx> IntoKind for Ty<'tcx> {
+impl<'tcx> rustc_type_ir::inherent::IntoKind for Ty<'tcx> {
     type Kind = TyKind<'tcx>;
 
     fn kind(self) -> TyKind<'tcx> {
@@ -576,6 +522,14 @@ pub struct Term<'tcx> {
     marker: PhantomData<(Ty<'tcx>, Const<'tcx>)>,
 }
 
+impl<'tcx> rustc_type_ir::inherent::IntoKind for Term<'tcx> {
+    type Kind = TermKind<'tcx>;
+
+    fn kind(self) -> Self::Kind {
+        self.unpack()
+    }
+}
+
 #[cfg(parallel_compiler)]
 unsafe impl<'tcx> rustc_data_structures::sync::DynSend for Term<'tcx> where
     &'tcx (Ty<'tcx>, Const<'tcx>): rustc_data_structures::sync::DynSend
@@ -591,14 +545,10 @@ unsafe impl<'tcx> Sync for Term<'tcx> where &'tcx (Ty<'tcx>, Const<'tcx>): Sync 
 
 impl Debug for Term<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data = if let Some(ty) = self.ty() {
-            format!("Term::Ty({ty:?})")
-        } else if let Some(ct) = self.ct() {
-            format!("Term::Ct({ct:?})")
-        } else {
-            unreachable!()
-        };
-        f.write_str(&data)
+        match self.unpack() {
+            TermKind::Ty(ty) => write!(f, "Term::Ty({ty:?})"),
+            TermKind::Const(ct) => write!(f, "Term::Const({ct:?})"),
+        }
     }
 }
 
@@ -625,13 +575,19 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for Term<'tcx> {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        Ok(self.unpack().try_fold_with(folder)?.pack())
+        match self.unpack() {
+            ty::TermKind::Ty(ty) => ty.try_fold_with(folder).map(Into::into),
+            ty::TermKind::Const(ct) => ct.try_fold_with(folder).map(Into::into),
+        }
     }
 }
 
 impl<'tcx> TypeVisitable<TyCtxt<'tcx>> for Term<'tcx> {
     fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
-        self.unpack().visit_with(visitor)
+        match self.unpack() {
+            ty::TermKind::Ty(ty) => ty.visit_with(visitor),
+            ty::TermKind::Const(ct) => ct.visit_with(visitor),
+        }
     }
 }
 
@@ -684,15 +640,14 @@ impl<'tcx> Term<'tcx> {
         }
     }
 
-    /// This function returns the inner `AliasTy` for a `ty::Alias` or `ConstKind::Unevaluated`.
-    pub fn to_alias_ty(&self, tcx: TyCtxt<'tcx>) -> Option<AliasTy<'tcx>> {
+    pub fn to_alias_term(self) -> Option<AliasTerm<'tcx>> {
         match self.unpack() {
             TermKind::Ty(ty) => match *ty.kind() {
-                ty::Alias(_kind, alias_ty) => Some(alias_ty),
+                ty::Alias(_kind, alias_ty) => Some(alias_ty.into()),
                 _ => None,
             },
             TermKind::Const(ct) => match ct.kind() {
-                ConstKind::Unevaluated(uv) => Some(AliasTy::new(tcx, uv.def, uv.args)),
+                ConstKind::Unevaluated(uv) => Some(uv.into()),
                 _ => None,
             },
         }
@@ -710,13 +665,7 @@ const TAG_MASK: usize = 0b11;
 const TYPE_TAG: usize = 0b00;
 const CONST_TAG: usize = 0b01;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
-#[derive(HashStable, TypeFoldable, TypeVisitable)]
-pub enum TermKind<'tcx> {
-    Ty(Ty<'tcx>),
-    Const(Const<'tcx>),
-}
-
+#[extension(pub trait TermKindPackExt<'tcx>)]
 impl<'tcx> TermKind<'tcx> {
     #[inline]
     fn pack(self) -> Term<'tcx> {
@@ -981,7 +930,7 @@ pub struct Placeholder<T> {
 
 pub type PlaceholderRegion = Placeholder<BoundRegion>;
 
-impl PlaceholderLike for PlaceholderRegion {
+impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderRegion {
     fn universe(self) -> UniverseIndex {
         self.universe
     }
@@ -1001,7 +950,7 @@ impl PlaceholderLike for PlaceholderRegion {
 
 pub type PlaceholderType = Placeholder<BoundTy>;
 
-impl PlaceholderLike for PlaceholderType {
+impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderType {
     fn universe(self) -> UniverseIndex {
         self.universe
     }
@@ -1028,7 +977,7 @@ pub struct BoundConst<'tcx> {
 
 pub type PlaceholderConst = Placeholder<BoundVar>;
 
-impl PlaceholderLike for PlaceholderConst {
+impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderConst {
     fn universe(self) -> UniverseIndex {
         self.universe
     }
@@ -1863,6 +1812,11 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Determines whether an item is annotated with an attribute.
     pub fn has_attr(self, did: impl Into<DefId>, attr: Symbol) -> bool {
         self.get_attrs(did, attr).next().is_some()
+    }
+
+    /// Determines whether an item is annotated with a multi-segement attribute
+    pub fn has_attrs_with_path(self, did: impl Into<DefId>, attrs: &[Symbol]) -> bool {
+        self.get_attrs_by_path(did.into(), attrs).next().is_some()
     }
 
     /// Returns `true` if this is an `auto trait`.

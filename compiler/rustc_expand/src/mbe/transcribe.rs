@@ -261,6 +261,16 @@ pub(super) fn transcribe<'a>(
                             // without wrapping them into groups.
                             maybe_use_metavar_location(cx, &stack, sp, tt, &mut marker)
                         }
+                        MatchedSingle(ParseNtResult::Ident(ident, is_raw)) => {
+                            marker.visit_span(&mut sp);
+                            let kind = token::NtIdent(*ident, *is_raw);
+                            TokenTree::token_alone(kind, sp)
+                        }
+                        MatchedSingle(ParseNtResult::Lifetime(ident)) => {
+                            marker.visit_span(&mut sp);
+                            let kind = token::NtLifetime(*ident);
+                            TokenTree::token_alone(kind, sp)
+                        }
                         MatchedSingle(ParseNtResult::Nt(nt)) => {
                             // Other variables are emitted into the output stream as groups with
                             // `Delimiter::Invisible` to maintain parsing priorities.
@@ -675,14 +685,14 @@ fn transcribe_metavar_expr<'a>(
             }
             None => return Err(out_of_bounds_err(cx, repeats.len(), sp.entire(), "index")),
         },
-        MetaVarExpr::Length(depth) => match repeats.iter().nth_back(depth) {
+        MetaVarExpr::Len(depth) => match repeats.iter().nth_back(depth) {
             Some((_, length)) => {
                 result.push(TokenTree::token_alone(
                     TokenKind::lit(token::Integer, sym::integer(*length), None),
                     visited_span(),
                 ));
             }
-            None => return Err(out_of_bounds_err(cx, repeats.len(), sp.entire(), "length")),
+            None => return Err(out_of_bounds_err(cx, repeats.len(), sp.entire(), "len")),
         },
     }
     Ok(())

@@ -441,7 +441,7 @@ fn noop_visit_use_tree<T: MutVisitor>(use_tree: &mut UseTree, vis: &mut T) {
     vis.visit_path(prefix);
     match kind {
         UseTreeKind::Simple(rename) => visit_opt(rename, |rename| vis.visit_ident(rename)),
-        UseTreeKind::Nested(items) => {
+        UseTreeKind::Nested { items, .. } => {
             for (tree, id) in items {
                 vis.visit_use_tree(tree);
                 vis.visit_id(id);
@@ -499,8 +499,8 @@ pub fn noop_visit_ty<T: MutVisitor>(ty: &mut P<Ty>, vis: &mut T) {
             vis.visit_mt(mt);
         }
         TyKind::BareFn(bft) => {
-            let BareFnTy { unsafety, ext: _, generic_params, decl, decl_span } = bft.deref_mut();
-            visit_unsafety(unsafety, vis);
+            let BareFnTy { safety, ext: _, generic_params, decl, decl_span } = bft.deref_mut();
+            visit_safety(safety, vis);
             generic_params.flat_map_in_place(|param| vis.flat_map_generic_param(param));
             vis.visit_fn_decl(decl);
             vis.visit_span(decl_span);
@@ -543,8 +543,8 @@ pub fn noop_visit_ty<T: MutVisitor>(ty: &mut P<Ty>, vis: &mut T) {
 }
 
 fn noop_visit_foreign_mod<T: MutVisitor>(foreign_mod: &mut ForeignMod, vis: &mut T) {
-    let ForeignMod { unsafety, abi: _, items } = foreign_mod;
-    visit_unsafety(unsafety, vis);
+    let ForeignMod { safety, abi: _, items } = foreign_mod;
+    visit_safety(safety, vis);
     items.flat_map_in_place(|item| vis.flat_map_foreign_item(item));
 }
 
@@ -781,10 +781,14 @@ pub fn visit_token<T: MutVisitor>(t: &mut Token, vis: &mut T) {
             *span = ident.span;
             return; // Avoid visiting the span for the second time.
         }
+        token::NtIdent(ident, _is_raw) => {
+            vis.visit_ident(ident);
+        }
+        token::NtLifetime(ident) => {
+            vis.visit_ident(ident);
+        }
         token::Interpolated(nt) => {
             let nt = Lrc::make_mut(nt);
-            let (nt, sp) = (&mut nt.0, &mut nt.1);
-            vis.visit_span(sp);
             visit_nonterminal(nt, vis);
         }
         _ => {}
@@ -834,8 +838,6 @@ fn visit_nonterminal<T: MutVisitor>(nt: &mut token::Nonterminal, vis: &mut T) {
         token::NtPat(pat) => vis.visit_pat(pat),
         token::NtExpr(expr) => vis.visit_expr(expr),
         token::NtTy(ty) => vis.visit_ty(ty),
-        token::NtIdent(ident, _is_raw) => vis.visit_ident(ident),
-        token::NtLifetime(ident) => vis.visit_ident(ident),
         token::NtLiteral(expr) => vis.visit_expr(expr),
         token::NtMeta(item) => {
             let AttrItem { path, args, tokens } = item.deref_mut();
@@ -857,10 +859,10 @@ fn visit_defaultness<T: MutVisitor>(defaultness: &mut Defaultness, vis: &mut T) 
 }
 
 // No `noop_` prefix because there isn't a corresponding method in `MutVisitor`.
-fn visit_unsafety<T: MutVisitor>(unsafety: &mut Unsafe, vis: &mut T) {
-    match unsafety {
-        Unsafe::Yes(span) => vis.visit_span(span),
-        Unsafe::No => {}
+fn visit_safety<T: MutVisitor>(safety: &mut Safety, vis: &mut T) {
+    match safety {
+        Safety::Unsafe(span) => vis.visit_span(span),
+        Safety::Default => {}
     }
 }
 
@@ -1090,8 +1092,8 @@ impl NoopVisitItemKind for ItemKind {
                 vis.visit_generics(generics);
                 visit_opt(body, |body| vis.visit_block(body));
             }
-            ItemKind::Mod(unsafety, mod_kind) => {
-                visit_unsafety(unsafety, vis);
+            ItemKind::Mod(safety, mod_kind) => {
+                visit_safety(safety, vis);
                 match mod_kind {
                     ModKind::Loaded(items, _inline, ModSpans { inner_span, inject_use_span }) => {
                         vis.visit_span(inner_span);
@@ -1128,7 +1130,7 @@ impl NoopVisitItemKind for ItemKind {
             }
             ItemKind::Impl(box Impl {
                 defaultness,
-                unsafety,
+                safety,
                 generics,
                 constness,
                 polarity,
@@ -1137,7 +1139,7 @@ impl NoopVisitItemKind for ItemKind {
                 items,
             }) => {
                 visit_defaultness(defaultness, vis);
-                visit_unsafety(unsafety, vis);
+                visit_safety(safety, vis);
                 vis.visit_generics(generics);
                 visit_constness(constness, vis);
                 visit_polarity(polarity, vis);
@@ -1145,8 +1147,8 @@ impl NoopVisitItemKind for ItemKind {
                 vis.visit_ty(self_ty);
                 items.flat_map_in_place(|item| vis.flat_map_impl_item(item));
             }
-            ItemKind::Trait(box Trait { unsafety, is_auto: _, generics, bounds, items }) => {
-                visit_unsafety(unsafety, vis);
+            ItemKind::Trait(box Trait { safety, is_auto: _, generics, bounds, items }) => {
+                visit_safety(safety, vis);
                 vis.visit_generics(generics);
                 visit_bounds(bounds, vis);
                 items.flat_map_in_place(|item| vis.flat_map_trait_item(item));
@@ -1163,6 +1165,19 @@ impl NoopVisitItemKind for ItemKind {
                 vis.visit_path(path);
                 if let Some(rename) = rename {
                     vis.visit_ident(rename);
+                }
+                if let Some(body) = body {
+                    vis.visit_block(body);
+                }
+            }
+            ItemKind::DelegationMac(box DelegationMac { qself, prefix, suffixes, body }) => {
+                vis.visit_qself(qself);
+                vis.visit_path(prefix);
+                for (ident, rename) in suffixes {
+                    vis.visit_ident(ident);
+                    if let Some(rename) = rename {
+                        vis.visit_ident(rename);
+                    }
                 }
                 if let Some(body) = body {
                     vis.visit_block(body);
@@ -1211,6 +1226,19 @@ impl NoopVisitItemKind for AssocItemKind {
                     visitor.visit_block(body);
                 }
             }
+            AssocItemKind::DelegationMac(box DelegationMac { qself, prefix, suffixes, body }) => {
+                visitor.visit_qself(qself);
+                visitor.visit_path(prefix);
+                for (ident, rename) in suffixes {
+                    visitor.visit_ident(ident);
+                    if let Some(rename) = rename {
+                        visitor.visit_ident(rename);
+                    }
+                }
+                if let Some(body) = body {
+                    visitor.visit_block(body);
+                }
+            }
         }
     }
 }
@@ -1226,10 +1254,10 @@ fn visit_const_item<T: MutVisitor>(
 }
 
 fn noop_visit_fn_header<T: MutVisitor>(header: &mut FnHeader, vis: &mut T) {
-    let FnHeader { unsafety, coroutine_kind, constness, ext: _ } = header;
+    let FnHeader { safety, coroutine_kind, constness, ext: _ } = header;
     visit_constness(constness, vis);
     coroutine_kind.as_mut().map(|coroutine_kind| vis.visit_coroutine_kind(coroutine_kind));
-    visit_unsafety(unsafety, vis);
+    visit_safety(safety, vis);
 }
 
 pub fn noop_visit_crate<T: MutVisitor>(krate: &mut Crate, vis: &mut T) {

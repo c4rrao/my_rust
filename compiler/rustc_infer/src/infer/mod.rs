@@ -44,6 +44,7 @@ use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::{self, GenericParamDefKind, InferConst, InferTy, Ty, TyCtxt};
 use rustc_middle::ty::{ConstVid, EffectVid, FloatVid, IntVid, TyVid};
 use rustc_middle::ty::{GenericArg, GenericArgKind, GenericArgs, GenericArgsRef};
+use rustc_middle::{bug, span_bug};
 use rustc_span::symbol::Symbol;
 use rustc_span::Span;
 use snapshot::undo_log::InferCtxtUndoLogs;
@@ -368,33 +369,43 @@ impl<'tcx> ty::InferCtxtLike for InferCtxt<'tcx> {
         }
     }
 
-    fn root_ty_var(&self, vid: TyVid) -> TyVid {
-        self.root_var(vid)
-    }
-
-    fn probe_ty_var(&self, vid: TyVid) -> Option<Ty<'tcx>> {
-        self.probe_ty_var(vid).ok()
-    }
-
-    fn opportunistic_resolve_lt_var(&self, vid: ty::RegionVid) -> Option<ty::Region<'tcx>> {
-        let re = self
-            .inner
-            .borrow_mut()
-            .unwrap_region_constraints()
-            .opportunistic_resolve_var(self.tcx, vid);
-        if *re == ty::ReVar(vid) { None } else { Some(re) }
-    }
-
-    fn root_ct_var(&self, vid: ConstVid) -> ConstVid {
-        self.root_const_var(vid)
-    }
-
-    fn probe_ct_var(&self, vid: ConstVid) -> Option<ty::Const<'tcx>> {
-        self.probe_const_var(vid).ok()
+    fn opportunistic_resolve_lt_var(&self, vid: ty::RegionVid) -> ty::Region<'tcx> {
+        self.inner.borrow_mut().unwrap_region_constraints().opportunistic_resolve_var(self.tcx, vid)
     }
 
     fn defining_opaque_types(&self) -> &'tcx ty::List<LocalDefId> {
         self.defining_opaque_types
+    }
+
+    fn opportunistic_resolve_ty_var(&self, vid: TyVid) -> Ty<'tcx> {
+        match self.probe_ty_var(vid) {
+            Ok(ty) => ty,
+            Err(_) => Ty::new_var(self.tcx, self.root_var(vid)),
+        }
+    }
+
+    fn opportunistic_resolve_int_var(&self, vid: IntVid) -> Ty<'tcx> {
+        self.opportunistic_resolve_int_var(vid)
+    }
+
+    fn opportunistic_resolve_float_var(&self, vid: FloatVid) -> Ty<'tcx> {
+        self.opportunistic_resolve_float_var(vid)
+    }
+
+    fn opportunistic_resolve_ct_var(&self, vid: ConstVid, ty: Ty<'tcx>) -> ty::Const<'tcx> {
+        match self.probe_const_var(vid) {
+            Ok(ct) => ct,
+            Err(_) => ty::Const::new_var(self.tcx, self.root_const_var(vid), ty),
+        }
+    }
+
+    fn opportunistic_resolve_effect_var(&self, vid: EffectVid, ty: Ty<'tcx>) -> ty::Const<'tcx> {
+        match self.probe_effect_var(vid) {
+            Some(ct) => ct,
+            None => {
+                ty::Const::new_infer(self.tcx, InferConst::EffectVar(self.root_effect_var(vid)), ty)
+            }
+        }
     }
 }
 
@@ -403,7 +414,7 @@ impl<'tcx> ty::InferCtxtLike for InferCtxt<'tcx> {
 pub enum ValuePairs<'tcx> {
     Regions(ExpectedFound<ty::Region<'tcx>>),
     Terms(ExpectedFound<ty::Term<'tcx>>),
-    Aliases(ExpectedFound<ty::AliasTy<'tcx>>),
+    Aliases(ExpectedFound<ty::AliasTerm<'tcx>>),
     TraitRefs(ExpectedFound<ty::TraitRef<'tcx>>),
     PolySigs(ExpectedFound<ty::PolyFnSig<'tcx>>),
     ExistentialTraitRef(ExpectedFound<ty::PolyExistentialTraitRef<'tcx>>),
@@ -528,8 +539,8 @@ pub enum RegionVariableOrigin {
 
     /// Region variables created as the values for early-bound regions.
     ///
-    /// FIXME(@lcnr): This can also store a `DefId`, similar to
-    /// `TypeVariableOriginKind::TypeParameterDefinition`.
+    /// FIXME(@lcnr): This should also store a `DefId`, similar to
+    /// `TypeVariableOrigin`.
     RegionParameterDefinition(Span, Symbol),
 
     /// Region variables created when instantiating a binder with
@@ -989,41 +1000,50 @@ impl<'tcx> InferCtxt<'tcx> {
         self.inner.borrow_mut().type_variables().num_vars()
     }
 
-    pub fn next_ty_var_id(&self, origin: TypeVariableOrigin) -> TyVid {
-        self.inner.borrow_mut().type_variables().new_var(self.universe(), origin)
+    pub fn next_ty_var(&self, span: Span) -> Ty<'tcx> {
+        self.next_ty_var_with_origin(TypeVariableOrigin { span, param_def_id: None })
     }
 
-    pub fn next_ty_var(&self, origin: TypeVariableOrigin) -> Ty<'tcx> {
-        Ty::new_var(self.tcx, self.next_ty_var_id(origin))
-    }
-
-    pub fn next_ty_var_id_in_universe(
-        &self,
-        origin: TypeVariableOrigin,
-        universe: ty::UniverseIndex,
-    ) -> TyVid {
-        self.inner.borrow_mut().type_variables().new_var(universe, origin)
-    }
-
-    pub fn next_ty_var_in_universe(
-        &self,
-        origin: TypeVariableOrigin,
-        universe: ty::UniverseIndex,
-    ) -> Ty<'tcx> {
-        let vid = self.next_ty_var_id_in_universe(origin, universe);
+    pub fn next_ty_var_with_origin(&self, origin: TypeVariableOrigin) -> Ty<'tcx> {
+        let vid = self.inner.borrow_mut().type_variables().new_var(self.universe(), origin);
         Ty::new_var(self.tcx, vid)
     }
 
-    pub fn next_const_var(&self, ty: Ty<'tcx>, origin: ConstVariableOrigin) -> ty::Const<'tcx> {
-        ty::Const::new_var(self.tcx, self.next_const_var_id(origin), ty)
+    pub fn next_ty_var_id_in_universe(&self, span: Span, universe: ty::UniverseIndex) -> TyVid {
+        let origin = TypeVariableOrigin { span, param_def_id: None };
+        self.inner.borrow_mut().type_variables().new_var(universe, origin)
+    }
+
+    pub fn next_ty_var_in_universe(&self, span: Span, universe: ty::UniverseIndex) -> Ty<'tcx> {
+        let vid = self.next_ty_var_id_in_universe(span, universe);
+        Ty::new_var(self.tcx, vid)
+    }
+
+    pub fn next_const_var(&self, ty: Ty<'tcx>, span: Span) -> ty::Const<'tcx> {
+        self.next_const_var_with_origin(ty, ConstVariableOrigin { span, param_def_id: None })
+    }
+
+    pub fn next_const_var_with_origin(
+        &self,
+        ty: Ty<'tcx>,
+        origin: ConstVariableOrigin,
+    ) -> ty::Const<'tcx> {
+        let vid = self
+            .inner
+            .borrow_mut()
+            .const_unification_table()
+            .new_key(ConstVariableValue::Unknown { origin, universe: self.universe() })
+            .vid;
+        ty::Const::new_var(self.tcx, vid, ty)
     }
 
     pub fn next_const_var_in_universe(
         &self,
         ty: Ty<'tcx>,
-        origin: ConstVariableOrigin,
+        span: Span,
         universe: ty::UniverseIndex,
     ) -> ty::Const<'tcx> {
+        let origin = ConstVariableOrigin { span, param_def_id: None };
         let vid = self
             .inner
             .borrow_mut()
@@ -1033,28 +1053,14 @@ impl<'tcx> InferCtxt<'tcx> {
         ty::Const::new_var(self.tcx, vid, ty)
     }
 
-    pub fn next_const_var_id(&self, origin: ConstVariableOrigin) -> ConstVid {
-        self.inner
-            .borrow_mut()
-            .const_unification_table()
-            .new_key(ConstVariableValue::Unknown { origin, universe: self.universe() })
-            .vid
-    }
-
-    fn next_int_var_id(&self) -> IntVid {
-        self.inner.borrow_mut().int_unification_table().new_key(None)
-    }
-
     pub fn next_int_var(&self) -> Ty<'tcx> {
-        Ty::new_int_var(self.tcx, self.next_int_var_id())
-    }
-
-    fn next_float_var_id(&self) -> FloatVid {
-        self.inner.borrow_mut().float_unification_table().new_key(None)
+        let vid = self.inner.borrow_mut().int_unification_table().new_key(None);
+        Ty::new_int_var(self.tcx, vid)
     }
 
     pub fn next_float_var(&self) -> Ty<'tcx> {
-        Ty::new_float_var(self.tcx, self.next_float_var_id())
+        let vid = self.inner.borrow_mut().float_unification_table().new_key(None);
+        Ty::new_float_var(self.tcx, vid)
     }
 
     /// Creates a fresh region variable with the next available index.
@@ -1468,24 +1474,13 @@ impl<'tcx> InferCtxt<'tcx> {
             fn replace_ty(&mut self, bt: ty::BoundTy) -> Ty<'tcx> {
                 self.map
                     .entry(bt.var)
-                    .or_insert_with(|| {
-                        self.infcx
-                            .next_ty_var(TypeVariableOrigin { param_def_id: None, span: self.span })
-                            .into()
-                    })
+                    .or_insert_with(|| self.infcx.next_ty_var(self.span).into())
                     .expect_ty()
             }
             fn replace_const(&mut self, bv: ty::BoundVar, ty: Ty<'tcx>) -> ty::Const<'tcx> {
                 self.map
                     .entry(bv)
-                    .or_insert_with(|| {
-                        self.infcx
-                            .next_const_var(
-                                ty,
-                                ConstVariableOrigin { param_def_id: None, span: self.span },
-                            )
-                            .into()
-                    })
+                    .or_insert_with(|| self.infcx.next_const_var(ty, self.span).into())
                     .expect_const()
             }
         }
@@ -1892,7 +1887,7 @@ impl<'tcx> SubregionOrigin<'tcx> {
                 SubregionOrigin::ReferenceOutlivesReferent(ref_type, cause.span)
             }
 
-            traits::ObligationCauseCode::CompareImplItemObligation {
+            traits::ObligationCauseCode::CompareImplItem {
                 impl_item_def_id,
                 trait_item_def_id,
                 kind: _,
